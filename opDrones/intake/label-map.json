@@ -1,0 +1,14 @@
+{
+  "_comment": "Maps classifier output labels to erfMap feature kinds (see kinds in erfmap-survey/model.js). Labels that already equal an erfMap kind need no entry. Unmapped labels become unknown and are flagged for review.",
+  "map": {
+    "lawn": "grass",
+    "turf": "grass",
+    "asphalt": "road",
+    "sidewalk": "pavement",
+    "roof": "building",
+    "pond": "water",
+    "trash_can": "bin",
+    "lamp": "light",
+    "trail": "path"
+  }
+}

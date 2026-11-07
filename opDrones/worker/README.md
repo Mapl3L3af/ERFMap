@@ -1,0 +1,67 @@
+# erfMap video-intake worker
+
+The erfMap server (`server.js`) handles uploads, jobs and the review UI. Video processing and computer vision happen in this Python worker. The server runs it once for each pipeline stage, `python worker/erfmap_worker.py run <stage> <job-folder>`, and streams the JSON progress it prints to the browser.
+
+## Setup
+
+1. Install Python 3.10 or later and FFmpeg (`ffmpeg` and `ffprobe` must be on PATH).
+2. `pip install -r worker/requirements.txt` (NumPy and OpenCV headless).
+3. Start erfMap as usual (`node server.js`) and open **Video Intake** on the front page, or go to `/intake/`. The intake page lists which tools it found.
+
+| Variable | Purpose |
+| --- | --- |
+| `ERFMAP_PYTHON` | Python command (default `python3`, or `python` on Windows) |
+| `ERFMAP_FFMPEG`, `ERFMAP_FFPROBE` | Path to `ffmpeg`/`ffprobe`, or to the folder that holds them. Setting one folder covers both. Otherwise the worker uses PATH and, on Windows, also checks the registry PATH and winget, Chocolatey, Scoop and `C:\ffmpeg\bin` installs. |
+| `ERFMAP_SEGMENTER` | Optional command that replaces the colour-clustering region detector (for example a SAM 2 wrapper) |
+| `ERFMAP_CLASSIFIER` | Optional command that labels regions (a model trained on erfMap labels) |
+
+Set these before starting the server; the worker inherits the server's environment. If a stage is unavailable, set it up and then use **Retry this stage**.
+
+## Stages and what they really do
+
+| Stage | Implementation | Status without extra setup |
+| --- | --- | --- |
+| Video & metadata | `ffprobe`: container, codec, resolution, frame rate, rotation, creation time, camera tags, telemetry streams | Works |
+| 1. Frame selection | FFmpeg samples up to 60 frames (at most 2 per second). OpenCV scores sharpness (Laplacian variance), brightness, contrast and edge texture. Frames are flagged as blurry, dark, overexposed, low texture or tilted (bright, featureless sky band). | Works. Tilt is a heuristic because the worker does not parse gimbal telemetry. |
+| 2. Image correction | CLAHE contrast equalisation and light denoising, with before/after previews. ORB feature matching and RANSAC homographies chain each frame to a middle reference frame, and the result is a planar alignment preview. Lens correction runs only if `camera.json` (`fx`, `fy`, `cx`, `cy`, `dist`) is in the job folder. | Works. Lens correction is unavailable without calibration. The preview is not an orthomosaic. |
+| Scale calibration | Square boards are detected at several thresholds, refined at half contrast with fitted edges, projected into the preview and grouped across frames. Each marker is flagged as blurry, too small (under 24 px), seen in too few frames (under 3) or possibly obscured. The reviewer confirms or corrects the corners, or places markers by hand. | Works. The scale comes only from the corners the reviewer confirms. |
+| 3. Region detection | Baseline: k-means colour clustering on up to 10 keyframes, turned into polygons. Or `ERFMAP_SEGMENTER`. | Baseline works. It is not a learned model. |
+| 4. Classification | `ERFMAP_CLASSIFIER` only. Predictions below 0.6 confidence, or with no label, are marked for review. | **Unavailable.** Regions stay unlabelled, and the reviewer labels them. |
+| 5. Cross-frame merging | Regions are warped into the preview, matched by IoU over 0.3 (one per frame) and merged by majority vote. Label conflicts, varying geometry and single-frame detections are flagged. | Works |
+| 6. Map geometry | Metres per preview pixel is the median over confirmed markers, and marker disagreement is reported. Areas stay polygons, lines become the long axis of the region and points become centroids, following erfMap's `kinds` geometry. | Works once a marker is confirmed |
+| 7. Review & export | In the browser: relabel, rename, set an estimated height, move vertices, and accept or reject. Then import into erfMap, download the scenario JSON, or download a `.glb`. | Works |
+
+Every stage writes `stages/<stage>/result.json` and its images under the job folder, `.erfmap-data/intake/<job>/`. The original upload is kept in `original/`. Retrying a stage clears that stage and the ones after it, and keeps earlier results. Rerunning correction or marker detection replaces marker confirmations, because the preview coordinates change.
+
+## Adapter contracts
+
+Both adapters are shell commands. They receive JSON on stdin and must print JSON on stdout. A non-zero exit marks the stage as failed and shows stderr in the UI.
+
+**Classifier** (`ERFMAP_CLASSIFIER`):
+
+```json
+// stdin
+{"labels": [{"kind": "grass", "label": "Grass", "color": "#b1c990", "geometry": "area"}, ...],
+ "regions": [{"id": "R1", "frame": "f0004", "crop": "/abs/path/R1.png", "polygon": [[x, y], ...], "mean_rgb": [r, g, b], "area_px": 1234}]}
+// stdout
+{"model": {"name": "my-model", "version": "3"}, "predictions": [{"id": "R1", "label": "lawn", "confidence": 0.91}]}
+```
+
+Labels are mapped to erfMap kinds through `intake/label-map.json`. A label that already matches a kind needs no entry. Unmapped labels become unknown and are flagged for review. To extend the label set, add kinds to `erfmap-survey/model.js` (the UI reads them from there) and map new model labels in `label-map.json`.
+
+`worker/adapters/colour_heuristic_classifier.py` implements this contract with a colour heuristic. It exists only to test the boundary. It reports `"heuristic": true`, caps confidence at 0.5 and is labelled as not a trained model in the UI.
+
+**Segmenter** (`ERFMAP_SEGMENTER`): stdin `{"job": "...", "frames": [{"id": "f0004", "image": "/abs/path.jpg"}]}`. stdout `{"regions": [{"frame": "f0004", "polygon": [[x, y], ...], "score": 0.9}]}`.
+
+## Accuracy and limits
+
+- The output is **locally scaled and unreferenced**: metres from an arbitrary origin, with axes that follow the reference video frame. North is unknown and no geographic coordinate is produced. The scenario records this under `site.localScale`.
+- One marker gives scale near that marker only. Spread several boards across the site. If confirmed markers disagree by more than 10%, the UI warns about tilt, relief or a poor alignment.
+- The planar alignment assumes a roughly flat site seen from above. Relief, tall objects, oblique views and lens distortion are not removed.
+- There is no elevation model. Scenarios have no ground samples, 3D exports are flat, and contours are not offered. Connecting an OpenDroneMap DSM is future work.
+- On the synthetic test video, scale from markers is within about 3% of ground truth. Real footage will vary.
+
+## Tests
+
+- `npm test` runs the Node tests for conversion and GLB export.
+- `python -m unittest worker/tests/test_pipeline.py` renders a synthetic flyover with known scale (`worker/tests/make_synthetic_video.py`) and runs every worker stage.
