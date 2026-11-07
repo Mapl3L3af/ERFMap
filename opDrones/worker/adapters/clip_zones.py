@@ -2,8 +2,8 @@
 """Two-stage zero-shot labelling with CLIP: zone polygons, then point features.
 
 Stage 1, zones. A grid of overlapping windows is scored by CLIP as building,
-path, road, grass or tree. The scores are spread over colour segments so zone
-edges follow visible edges, then zones are assigned in priority order:
+path, road, grass or tree. The scores are smoothed with an edge-aware filter so
+zone edges follow visible edges in the photo, then zones are assigned in priority order:
 
   1. buildings are reserved first;
   2. paths and roads next (kept as separate classes), closed along their
@@ -58,16 +58,53 @@ POINT_MARGIN = 2.0        # ... and this many times the best surface score
 
 
 # ---------------------------------------------------------------- geometry (no CLIP needed)
-def segments(image, block):
-    """Colour segments, cut into blocks so each stays local: zone edges then follow visible edges."""
-    h, w = image.shape[:2]
-    lab = cv2.cvtColor(cv2.GaussianBlur(image, (5, 5), 0), cv2.COLOR_BGR2LAB).reshape(-1, 3).astype(np.float32)
-    _, labels, _ = cv2.kmeans(lab, 8, None, (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 15, 1.0), 2, cv2.KMEANS_PP_CENTERS)
-    labels = labels.reshape(h, w).astype(np.int32)
-    by, bx = np.mgrid[0:h, 0:w]
-    key = labels * 10000 + (by // block) * 100 + (bx // block)
-    _, seg = np.unique(key, return_inverse=True)
-    return seg.reshape(h, w)
+def guided_filter(guide, src, radius, eps=1e-3):
+    """Edge-aware smoothing (He et al.): src is smoothed, but edges in guide (0-1 float, HxW) are kept."""
+    box = lambda a: cv2.boxFilter(a, -1, (2 * radius + 1, 2 * radius + 1))
+    mean_i = box(guide)
+    var_i = box(guide * guide) - mean_i * mean_i
+    out = np.empty_like(src)
+    for k in range(src.shape[2]):
+        p = src[:, :, k]
+        mean_p = box(p)
+        a = (box(guide * p) - mean_i * mean_p) / (var_i + eps)
+        b = mean_p - a * mean_i
+        out[:, :, k] = box(a) * guide + box(b)
+    return out
+
+
+def snap_to_edges(image, probs, radius):
+    """Move class boundaries onto visible edges: blur away window corners, then filter guided by
+    brightness and by the green-red colour axis (grass against paving and roofs)."""
+    probs = cv2.GaussianBlur(probs.astype(np.float32), (0, 0), radius / 2)
+    lab = cv2.cvtColor(cv2.bilateralFilter(image, 7, 30, 7), cv2.COLOR_BGR2LAB).astype(np.float32) / 255
+    for channel in (0, 1, 0):
+        probs = guided_filter(lab[:, :, channel], probs, radius)
+    probs = np.clip(probs, 0, None)
+    return probs / np.maximum(probs.sum(axis=2, keepdims=True), 1e-6)
+
+
+def fit_to_colour(mask, lab, allowed, steps):
+    """Let a zone flow along its own colour: within `steps` pixels of its edge, pixels that look like the
+    zone join it (following curves and ends the coarse scores missed) and pixels that don't drop out."""
+    if not mask.any():
+        return mask
+    colours = lab[mask]
+    centre = np.median(colours, axis=0)
+    spread = np.median(np.linalg.norm(colours - centre, axis=1))
+    match = (np.linalg.norm(lab - centre, axis=2) <= max(3.0 * spread, 0.04)) & allowed
+    kernel = np.ones((3, 3), np.uint8)
+    core = cv2.erode(mask.astype(np.uint8), kernel, iterations=steps) > 0
+    grown = (mask & match).astype(np.uint8)
+    for _ in range(steps):                                   # grow only through matching pixels
+        grown = cv2.dilate(grown, kernel) & match.astype(np.uint8)
+    return core | (grown > 0)
+
+
+def smooth_mask(mask, size):
+    """Round off jagged mask edges without moving them."""
+    m = cv2.GaussianBlur(mask.astype(np.float32), (0, 0), size)
+    return m >= 0.5
 
 
 def keyhole(outer, holes):
@@ -137,19 +174,15 @@ def build_zones(image, probs, size, trees=None, votes=None):
     h, w = image.shape[:2]
     scale = w / size[0]
     block = max(16, max(h, w) // 10)
-    seg = segments(image, block)
-    n = seg.max() + 1
-    counts = np.bincount(seg.ravel(), minlength=n).astype(np.float64)
-    mean = np.stack([np.bincount(seg.ravel(), weights=probs[:, :, k].ravel(), minlength=n) for k in range(len(CLASSES))], axis=1) / np.maximum(counts, 1)[:, None]
-    b, pth, rd, gr, tr = (mean[:, CLASSES.index(c)] for c in CLASSES)
-    best = mean.max(axis=1)
-    is_building = b >= PRIORITY * best
+    probs = snap_to_edges(image, probs, max(4, block // 6))
+    b, pth, rd, gr, tr = (probs[:, :, CLASSES.index(c)] for c in CLASSES)
+    best = probs.max(axis=2)
+    building = b >= PRIORITY * best
     # Where a tree crown is the best match, the ground under it is left to grass (the tree becomes a point),
     # so tree shadows and canopies are not mistaken for road.
-    is_line = ~is_building & (np.maximum(pth, rd) >= PRIORITY * best) & (tr < best)
-    is_path = is_line & (pth >= rd)
-    is_road = is_line & (rd > pth)
-    building, path, road = is_building[seg], is_path[seg], is_road[seg]
+    line = ~building & (np.maximum(pth, rd) >= PRIORITY * best) & (tr < best)
+    path = line & (pth >= rd)
+    road = line & (rd > pth)
 
     k = max(3, block // 4) | 1
     small = np.ones((k, k), np.uint8)
@@ -159,6 +192,16 @@ def build_zones(image, probs, size, trees=None, votes=None):
     reach = np.ones((2 * k + 1, 2 * k + 1), np.uint8)
     path = (cv2.morphologyEx(path.astype(np.uint8), cv2.MORPH_CLOSE, reach) > 0) & ~building
     road = (cv2.morphologyEx(road.astype(np.uint8), cv2.MORPH_CLOSE, reach) > 0) & ~building
+    lab = cv2.cvtColor(cv2.bilateralFilter(image, 7, 30, 7), cv2.COLOR_BGR2LAB).astype(np.float32) / 255
+    everywhere = np.ones((h, w), bool)
+    building = fit_to_colour(building, lab, everywhere, k)
+    path = fit_to_colour(path, lab, ~building & (pth >= rd), 2 * k)   # paths and roads may run on to their visible end,
+                                                                      # but a path never flows into road-like ground
+    road = fit_to_colour(road, lab, ~building & ~path, 2 * k)
+    soft = max(1.0, k / 6)
+    building = smooth_mask(building, soft)
+    path = smooth_mask(path, soft) & ~building
+    road = smooth_mask(road, soft) & ~building & ~path
     both = path & road
     path &= ~(both & (probs[:, :, 2] > probs[:, :, 1]))
     road &= ~path
@@ -193,7 +236,7 @@ def build_zones(image, probs, size, trees=None, votes=None):
             regions.append(point_region(x / scale, y / scale, 'tree', conf, 2 * r / scale))
         return regions
     # Trees: one point per crown, wherever trees dominate (usually over grass).
-    tree = (tr >= PRIORITY * best)[seg] & ~building & ~path & ~road
+    tree = (tr >= PRIORITY * best) & ~building & ~path & ~road
     tree = cv2.morphologyEx(tree.astype(np.uint8), cv2.MORPH_OPEN, small)
     crown = max(8, block // 2)
     # Pad with background first: otherwise OpenCV treats the photo edge as far from any edge,

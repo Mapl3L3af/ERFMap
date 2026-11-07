@@ -134,6 +134,46 @@ class ZonesTest(unittest.TestCase):
 
 
 
+def curved_scene():
+    """A curved path and a rotated building on textured grass, scored like CLIP: one score per 73 px window."""
+    label = np.full((H, W), cz.CLASSES.index('grass'), np.int32)
+    arc = np.zeros((H, W), np.uint8)
+    cv2.ellipse(arc, (200, 900), (700, 650), 0, 270, 360, 1, 40)
+    label[arc > 0] = cz.CLASSES.index('path')
+    roof = np.zeros((H, W), np.uint8)
+    cv2.fillPoly(roof, [np.array([[650, 80], [900, 140], [860, 330], [610, 270]])], 1)
+    label[roof > 0] = cz.CLASSES.index('building')
+    image = np.zeros((H, W, 3), np.uint8)
+    for name, colour in COLOURS.items():
+        image[label == cz.CLASSES.index(name)] = colour
+    rng = np.random.default_rng(2)
+    texture = cv2.GaussianBlur(rng.normal(0, 25, (H, W)).astype(np.float32), (0, 0), 3)
+    image = np.clip(image + texture[..., None] + rng.normal(0, 10, image.shape), 0, 255).astype(np.uint8)
+    onehot = np.eye(len(cz.CLASSES), dtype=np.float32)[label]
+    P, S = 73, 36
+    acc, hits = np.zeros((H, W, len(cz.CLASSES)), np.float32), np.zeros((H, W, 1), np.float32)
+    for y in list(range(0, H - P + 1, S)) + [H - P]:
+        for x in list(range(0, W - P + 1, S)) + [W - P]:
+            p = 0.15 + 0.7 * onehot[y:y + P, x:x + P].mean(axis=(0, 1))
+            acc[y:y + P, x:x + P] += p / p.sum()
+            hits[y:y + P, x:x + P] += 1
+    return image, acc / hits, label
+
+
+class OutlineTest(unittest.TestCase):
+    def test_outlines_follow_curves_not_the_score_grid(self):
+        image, probs, label = curved_scene()
+        regions = cz.build_zones(image, probs, (W, H))
+        for kind, least in (('building', 0.97), ('path', 0.92)):        # the old grid gave the path 0.83
+            mask = np.zeros((H, W), np.uint8)
+            for r in regions:
+                if r.get('model_label') == kind:
+                    cv2.fillPoly(mask, [np.round(np.array(r['polygon'])).astype(np.int32)], 1)
+            truth = label == cz.CLASSES.index(kind)
+            iou = (truth & (mask > 0)).sum() / (truth | (mask > 0)).sum()
+            self.assertGreater(iou, least, kind)
+
+
 class CouncilTest(unittest.TestCase):
     def test_label_names_map_onto_our_classes(self):
         ids = cz.map_labels({0: 'wall', 1: 'building, edifice', 2: 'sidewalk, pavement', 3: 'grass', 4: 'tree', 5: 'sky', 6: 'road, route', 7: 'impervious surfaces'}, cz.SYNONYMS)

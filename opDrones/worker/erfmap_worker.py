@@ -1028,7 +1028,7 @@ def mask_outline(mask, s, holes=False):
         return None
     outers = [i for i in range(len(contours)) if not holes or hierarchy[0][i][3] == -1]
     i = max(outers, key=lambda i: cv2.contourArea(contours[i]))
-    approx = cv2.approxPolyDP(contours[i], 0.006 * cv2.arcLength(contours[i], True), True).reshape(-1, 2)
+    approx = cv2.approxPolyDP(contours[i], max(1.0, 0.002 * max(mask.shape)), True).reshape(-1, 2)   # keep curves
     if len(approx) < 3:
         return None
     inner = []
