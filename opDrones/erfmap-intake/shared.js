@@ -49,6 +49,17 @@
 
     // Combine worker proposals with the reviewer's edits. Nothing here is accepted
     // unless the reviewer marked it accepted.
+    // Approximate size of a feature in metres, from its current (possibly edited) points.
+    function sizeOf(geometry, p) {
+        if (geometry === 'area' && p.length >= 3) {
+            let a = 0;
+            for (let i = 0; i < p.length; i++) { const q = p[i], r = p[(i + 1) % p.length]; a += q[0] * r[1] - r[0] * q[1]; }
+            return {area_m2: +Math.abs(a / 2).toFixed(1)};
+        }
+        if (geometry === 'line' && p.length >= 2) return {length_m: +p.slice(1).reduce((s, q, i) => s + Math.hypot(q[0] - p[i][0], q[1] - p[i][1]), 0).toFixed(2)};
+        return {};
+    }
+
     function reviewedFeatures(geometry, edits, labels) {
         return geometry.features.map(f => {
             const e = edits[f.id] || {};
@@ -62,6 +73,7 @@
                 flags: (f.flags || []).filter(x => !(e.kind && ['unlabelled', 'needs label'].includes(x))), note: f.note || null, width: f.width_m ?? null,
                 height: Number.isFinite(e.height) ? e.height : null, status: e.status || 'proposed',
                 edited: Boolean(e.p || (e.kind && e.kind !== f.kind) || e.name), reviewedAt: e.reviewedAt || null,
+                image: f.image || null, calibration: f.calibration || null, size: sizeOf(type, p),
             };
         });
     }
@@ -80,6 +92,11 @@
                 frames: f.frames, reviewStatus: 'accepted', reviewedAt: f.reviewedAt, editedByReviewer: f.edited,
                 heightSource: f.height ? 'reviewer estimate, not measured' : null,
             };
+            if (f.image) {
+                feature.intake.sourceImage = f.image.source || f.image.frame;
+                feature.intake.calibration = {...f.calibration, scaleNote: 'Scale from one measured distance in this photo only; approximate away from that segment.'};
+                feature.intake.approximateSize = f.size;
+            }
             return feature;
         });
         const xs = out.flatMap(f => f.p.map(p => p[0])), ys = out.flatMap(f => f.p.map(p => p[1]));
@@ -88,7 +105,14 @@
             name: 'Drone survey · ' + job.name.replace(/\.[^.]+$/, ''),
             w: +((xs.length ? Math.max(...xs) : 0) + MARGIN).toFixed(2), h: +((ys.length ? Math.max(...ys) : 0) + MARGIN).toFixed(2),
             features: out, samples: [], showContours: false,
-            localScale: {
+            localScale: scale.mode === 'per-image' ? {
+                label: 'Locally scaled, unreferenced', unreferenced: true,
+                method: 'One measured distance per photo; each photo scaled on its own',
+                images: (scale.images || []).map(i => ({image: i.source || i.frame, reference: i.reference, metres: i.metres, label: i.label, segmentPx: i.segment_px, metresPerPixel: i.m_per_px, flags: i.flags})),
+                axes: 'x and y follow each photo. Photos are placed side by side; their real positions relative to each other and north are unknown.',
+                limits: 'Approximate. Not survey-grade, no geographic coordinates, no measured heights. Perspective, camera tilt, terrain and lens distortion are not removed; sizes far from a photo\'s measured segment are less reliable.',
+                job: job.id,
+            } : {
                 label: 'Locally scaled, unreferenced', unreferenced: true,
                 method: '1 ft (0.3048 m) ground markers', markers: scale.markers || 0,
                 metresPerPixel: scale.m_per_px || null, markerDisagreement: scale.spread ?? null,
@@ -239,5 +263,5 @@
         return out;
     }
 
-    return {STAGES, NO_ELEVATION, centroid, axis, shapeFor, reviewedFeatures, buildSite, modelSummary, triangulate, buildGlb, geometryOf};
+    return {STAGES, NO_ELEVATION, centroid, axis, shapeFor, sizeOf, reviewedFeatures, buildSite, modelSummary, triangulate, buildGlb, geometryOf};
 });

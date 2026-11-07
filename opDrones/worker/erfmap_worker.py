@@ -130,6 +130,20 @@ def tool(name):
     return None
 
 
+def classifier_command():
+    """ERFMAP_CLASSIFIER if set ('off' disables), else the bundled CLIP adapter when open_clip is installed."""
+    configured = os.environ.get('ERFMAP_CLASSIFIER', '').strip()
+    if configured.lower() in ('off', 'none', '0'):
+        return None
+    if configured:
+        return configured
+    import importlib.util
+    if importlib.util.find_spec('open_clip') and importlib.util.find_spec('torch'):
+        script = Path(__file__).resolve().parent / 'adapters' / 'clip_classifier.py'
+        return subprocess.list2cmdline([sys.executable, str(script)]) if os.name == 'nt' else '"%s" "%s"' % (sys.executable, script)
+    return None
+
+
 def capabilities():
     ffmpeg, ffprobe = tool('ffmpeg'), tool('ffprobe')
     return {
@@ -141,7 +155,7 @@ def capabilities():
         'numpy': np is not None,
         'opencv': cv2.__version__ if cv2 is not None else None,
         'segmenter': os.environ.get('ERFMAP_SEGMENTER') or None,
-        'classifier': os.environ.get('ERFMAP_CLASSIFIER') or None,
+        'classifier': classifier_command(),
     }
 
 
@@ -474,8 +488,11 @@ def stage_correction(job):
         corrected.append({'id': f['id'], 'before': f['image'], 'after': rel(job, path), 'width': clean.shape[1], 'height': clean.shape[0]})
         progress(.4 * (i + 1) / len(frames), 'Cleaning frame %d of %d' % (i + 1, len(frames)))
 
-    # Planar alignment: chain consecutive-frame homographies to a middle reference frame.
     photos = (read_json(Path(job) / 'job.json') or {}).get('media') == 'photos'
+    if photos:
+        return photo_sheet(job, out, corrected, lens)
+
+    # Planar alignment: chain consecutive-frame homographies to a middle reference frame.
     orb = cv2.ORB_create(5000 if photos else 3000)
     matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
     feats = []
@@ -579,6 +596,40 @@ def stage_correction(job):
             'summary': 'Cleaned %d frames, %d of them aligned in one preview (reference %s)' % (len(corrected), aligned, corrected[ref]['id']),
             'lens': lens, 'cleanup': 'CLAHE contrast equalisation and light denoising', 'reference': corrected[ref]['id'],
             'frames': corrected, 'links': links, 'mosaic': {'image': rel(job, out / 'mosaic.jpg'), 'width': W, 'height': H_, 'scale': s},
+            'warnings': warnings}
+
+
+SHEET_MAX = 9000                # longest side of the photo sheet (px)
+
+
+def photo_sheet(job, out, corrected, lens):
+    """Photos are not stitched: each is calibrated on its own, so lay them out side by side."""
+    n = len(corrected)
+    cols = max(1, math.ceil(math.sqrt(n)))
+    rows = math.ceil(n / cols)
+    cell_w = max(c['width'] for c in corrected)
+    cell_h = max(c['height'] for c in corrected)
+    gap = int(0.08 * max(cell_w, cell_h))
+    full_w, full_h = cols * cell_w + (cols - 1) * gap, rows * cell_h + (rows - 1) * gap
+    s = min(1.0, SHEET_MAX / max(full_w, full_h))
+    W, H_ = int(math.ceil(full_w * s)), int(math.ceil(full_h * s))
+    sheet = np.full((H_, W, 3), 32, np.uint8)
+    for i, c in enumerate(corrected):
+        x, y = (i % cols) * (cell_w + gap) * s, (i // cols) * (cell_h + gap) * s
+        image = imread(Path(job) / c['after'])
+        w, h = int(round(c['width'] * s)), int(round(c['height'] * s))
+        x0, y0 = int(round(x)), int(round(y))
+        sheet[y0:y0 + h, x0:x0 + w] = cv2.resize(image, (w, h), interpolation=cv2.INTER_AREA) if s < 1 else image[:h, :w]
+        c['to_mosaic'] = to_list(np.array([[s, 0, x0], [0, s, y0], [0, 0, 1]], dtype=np.float64))
+        c['tile'] = [x0, y0, w, h]
+        progress(.4 + .6 * (i + 1) / n, 'Laying out photo %d of %d' % (i + 1, n))
+    cv2.imwrite(str(out / 'mosaic.jpg'), sheet, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    warnings = ['Photos are not stitched together. Each photo is scaled by its own measured distance, so their positions relative to each other are unknown.']
+    if lens['status'] != 'applied':
+        warnings.append(lens['reason'])
+    return {'status': 'complete', 'summary': 'Cleaned %d photos and laid them out side by side for per-photo calibration' % n,
+            'layout': 'sheet', 'lens': lens, 'cleanup': 'CLAHE contrast equalisation and light denoising', 'reference': None,
+            'frames': corrected, 'links': [], 'mosaic': {'image': rel(job, out / 'mosaic.jpg'), 'width': W, 'height': H_, 'scale': s},
             'warnings': warnings}
 
 
@@ -706,6 +757,13 @@ def find_squares(image):
 def stage_markers(job):
     need_cv()
     corr = stage_result(job, 'correction')
+    if corr.get('layout') == 'sheet':
+        flags_by_frame = {f['id']: f['flags'] for f in stage_result(job, 'frames')['frames']}
+        sources = {f['id']: f.get('source') for f in stage_result(job, 'frames')['frames']}
+        images = [{'frame': f['id'], 'source': sources.get(f['id']), 'tile': f['tile'], 'flags': flags_by_frame.get(f['id'], [])} for f in corr['frames']]
+        return {'status': 'needs_review', 'mode': 'per-image', 'summary': 'Calibrate each photo: click two points you measured on the ground and enter the distance.',
+                'mosaic': corr['mosaic'], 'images': images, 'markers': [], 'marker_side_m': MARKER_SIDE_M,
+                'warnings': ['Each photo needs its own measured distance. A photo without one is left out of the map.']}
     frames = [f for f in corr['frames'] if 'to_mosaic' in f]
     flags_by_frame = {f['id']: f['flags'] for f in stage_result(job, 'frames')['frames']}
     detections = []
@@ -765,7 +823,10 @@ def stage_markers(job):
 
 # ---------------------------------------------------------------- 4. regions
 def keyframes(job, limit=10):
-    frames = [f for f in stage_result(job, 'correction')['frames'] if 'to_mosaic' in f]
+    corr = stage_result(job, 'correction')
+    frames = [f for f in corr['frames'] if 'to_mosaic' in f]
+    if corr.get('layout') == 'sheet':
+        limit = 60
     if len(frames) <= limit:
         return frames
     step = (len(frames) - 1) / (limit - 1)
@@ -837,13 +898,19 @@ def stage_regions(job):
 
 
 # ---------------------------------------------------------------- 5. classification
+# Base surfaces: most of a site is grass, path or road, and other features sit on
+# top of them. Touching regions of one base kind are joined into one block per photo
+# (or per preview for video), with holes left by features on top filled in.
+BASE_KINDS = {'grass', 'path', 'road'}
+
+
 def stage_classification(job):
     need_cv()
     reg = stage_result(job, 'regions')
     labels = read_json(Path(job) / 'labels.json', {'labels': []})
     label_map = labels.get('map', {})
     kinds = {l['kind'] for l in labels['labels']}
-    classifier = os.environ.get('ERFMAP_CLASSIFIER')
+    classifier = classifier_command()
     out = stage_dir(job, 'classification')
     crops = out / 'crops'
     crops.mkdir(exist_ok=True)
@@ -866,16 +933,25 @@ def stage_classification(job):
     if not classifier:
         predictions = [{'id': r['id'], 'kind': None, 'model_label': None, 'confidence': None, 'needs_review': True} for r in reg['regions']]
         return {'status': 'unavailable', 'summary': 'No classifier configured. All %d regions are unlabelled and need review.' % len(predictions),
-                'reason': 'Set ERFMAP_CLASSIFIER to a command that implements the classifier contract in worker/README.md. Until then, label regions by hand in Review.',
+                'reason': 'Install the free CLIP classifier (pip install open_clip_torch) or set ERFMAP_CLASSIFIER to a command that implements the classifier contract in worker/README.md. Until then, label regions by hand in Review.',
                 'model': None, 'predictions': predictions, 'uncertain_below': UNCERTAIN_BELOW, 'warnings': []}
     progress(.4, 'Running classifier')
     reply = external(classifier, {'labels': labels['labels'], 'regions': payload}, 'Classifier')
     by_id = {p.get('id'): p for p in reply.get('predictions', [])}
-    predictions, unmapped = [], set()
+    def kind_of(r):
+        label = by_id.get(r['id'], {}).get('label') or by_id.get(r['id'], {}).get('kind')
+        return label, label_map.get(label, label)
+    predictions, unmapped, omitted = [], set(), 0
     for r in reg['regions']:
         p = by_id.get(r['id'], {})
-        model_label = p.get('label') or p.get('kind')
-        kind = label_map.get(model_label, model_label)
+        model_label, kind = kind_of(r)
+        reason = None
+        if model_label == 'omit':
+            reason = 'not one of the mapped kinds'
+        if reason:
+            omitted += 1
+            predictions.append({'id': r['id'], 'kind': None, 'model_label': model_label, 'confidence': p.get('confidence'), 'needs_review': False, 'omit': True, 'omit_reason': reason})
+            continue
         if model_label is not None and kind not in kinds:
             unmapped.add(str(model_label))
             kind = None
@@ -889,11 +965,50 @@ def stage_classification(job):
     if reply.get('model', {}).get('heuristic'):
         warnings.append('The configured classifier reports itself as a heuristic, not a trained model.')
     uncertain = sum(p['needs_review'] for p in predictions)
-    return {'status': 'needs_review' if uncertain else 'complete', 'summary': '%d regions classified, %d need review' % (len(predictions), uncertain),
+    return {'status': 'needs_review' if uncertain else 'complete', 'summary': '%d regions classified%s, %d need review' % (len(predictions) - omitted, ', %d omitted' % omitted if omitted else '', uncertain),
             'model': reply.get('model'), 'predictions': predictions, 'uncertain_below': UNCERTAIN_BELOW, 'warnings': warnings}
 
 
 # ---------------------------------------------------------------- 6. merging
+def join_blocks(merged, size, s, per_image=False):
+    """Join touching features of one base kind into one block (within one photo when photos are calibrated separately)."""
+    if per_image:
+        out, frames = [], sorted({tuple(m['frames']) for m in merged})
+        for key in frames:
+            out += join_blocks([m for m in merged if tuple(m['frames']) == key], size, s)
+        return out
+    out = [m for m in merged if m['kind'] not in BASE_KINDS]
+    gap = max(3, int(0.01 * max(size)))
+    for big in sorted(BASE_KINDS):
+        group = [m for m in merged if m['kind'] == big]
+        if len(group) < 2:
+            out += group
+            continue
+        mask = np.zeros((size[1], size[0]), np.uint8)
+        for m in group:
+            cv2.fillPoly(mask, [np.round(np.array(m['polygon']) * s).astype(np.int32)], 255)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((gap, gap), np.uint8))
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for contour in contours:
+            approx = cv2.approxPolyDP(contour, 0.006 * cv2.arcLength(contour, True), True).reshape(-1, 2)
+            if len(approx) < 3:
+                continue
+            inside = [m for m in group if cv2.pointPolygonTest(contour, tuple(float(v) * s for v in np.array(m['polygon']).mean(axis=0)), False) >= 0]
+            if not inside:
+                continue
+            if len(inside) == 1:
+                out.append(inside[0])
+                continue
+            confs = [m['confidence'] for m in inside if m['confidence'] is not None]
+            flags = sorted({f for m in inside for f in m['flags']} - {'seen in one frame only'})
+            out.append({'id': inside[0]['id'], 'polygon': (approx / s).round(1).tolist(), 'kind': big,
+                        'confidence': round(float(np.mean(confs)), 3) if confs else None,
+                        'members': [r for m in inside for r in m['members']], 'frames': sorted({f for m in inside for f in m['frames']}),
+                        'mean_iou': None, 'flags': flags + ['joined from %d touching %s features' % (len(inside), big)],
+                        'member_polygons': [mp for m in inside for mp in m['member_polygons']]})
+    return out
+
+
 def stage_merging(job):
     need_cv()
     corr = stage_result(job, 'correction')
@@ -904,12 +1019,15 @@ def stage_merging(job):
     W, H = corr['mosaic']['width'], corr['mosaic']['height']
     s = min(1.0, 900 / max(W, H))          # masks at reduced resolution
     size = (int(W * s) + 1, int(H * s) + 1)
-    items = []
+    items, omitted = [], 0
     for r in reg['regions']:
         poly = apply_h(to_mosaic[r['frame']], r['polygon'])
         mask = np.zeros((size[1], size[0]), np.uint8)
         cv2.fillPoly(mask, [np.round(poly * s).astype(np.int32)], 1)
         if mask.sum() < 4:
+            continue
+        if preds.get(r['id'], {}).get('omit'):
+            omitted += 1
             continue
         items.append({'region': r, 'poly': poly, 'mask': mask.astype(bool), 'pred': preds.get(r['id'], {})})
     items.sort(key=lambda it: -it['mask'].sum())
@@ -967,17 +1085,169 @@ def stage_merging(job):
                        'members': [m['region']['id'] for m in c['members']], 'frames': sorted({m['region']['frame'] for m in c['members']}),
                        'mean_iou': round(float(np.mean(c['ious'])), 3) if c['ious'] else None, 'flags': flags,
                        'member_polygons': [{'region': m['region']['id'], 'frame': m['region']['frame'], 'polygon': m['poly'].round(1).tolist()} for m in c['members']]})
+    merged = join_blocks(merged, size, s, per_image=corr.get('layout') == 'sheet')
     conflicts = sum(1 for m in merged if any(f.startswith('conflicting') or f.startswith('geometry') for f in m['flags']))
-    return {'status': 'needs_review' if conflicts else 'complete', 'summary': '%d regions merged into %d features, %d with conflicts' % (len(items), len(merged), conflicts),
-            'mosaic': corr['mosaic'], 'merged': merged, 'warnings': []}
+    return {'status': 'needs_review' if conflicts else 'complete', 'summary': '%d regions merged into %d features, %d with conflicts' % (len(items), len(merged), conflicts) + (', %d omitted by the classifier' % omitted if omitted else ''),
+            'mosaic': corr['mosaic'], 'layout': corr.get('layout'), 'merged': merged, 'warnings': []}
 
 
 # ---------------------------------------------------------------- 7. geometry
+def shape_of(poly, geometry):
+    """erfMap points (p), width and a note for one region outline in metres."""
+    note, width = None, None
+    if geometry == 'point':
+        M = cv2.moments(poly.astype(np.float32))
+        p = [[M['m10'] / M['m00'], M['m01'] / M['m00']]] if M['m00'] else [poly.mean(axis=0).tolist()]
+        note = 'Point placed at the region centroid.'
+    elif geometry == 'line':
+        (cx, cy), (w, h), angle = cv2.minAreaRect(poly.astype(np.float32))
+        length, a = (w, angle) if w >= h else (h, angle + 90)
+        dx, dy = math.cos(math.radians(a)) * length / 2, math.sin(math.radians(a)) * length / 2
+        p = [[cx - dx, cy - dy], [cx + dx, cy + dy]]
+        width = round(float(min(w, h)), 2)
+        note = 'Line approximated by the long axis of the region; width is %.1f m.' % width
+    else:
+        p = poly.tolist()
+    if width is None and geometry != 'point':
+        (_, _), (w, h), _ = cv2.minAreaRect(poly.astype(np.float32))
+        width = round(float(min(w, h)), 2)
+    return p, width, note
+
+
+def segment_distance(point, a, b):
+    """Distance from a point to the segment a-b."""
+    p, a, b = np.asarray(point, float), np.asarray(a, float), np.asarray(b, float)
+    t = np.clip(np.dot(p - a, b - a) / max(np.dot(b - a, b - a), 1e-9), 0, 1)
+    return float(np.linalg.norm(p - (a + t * (b - a))))
+
+
+def calibration_flags(job, frame, tile, ref, frame_flags):
+    """Reasons a photo's reference segment may give a poor scale."""
+    x0, y0, w, h = tile
+    flags = []
+    inside = lambda q: x0 <= q[0] <= x0 + w and y0 <= q[1] <= y0 + h
+    if not (inside(ref['a']) and inside(ref['b'])):
+        flags.append('reference segment leaves the photo')
+    length = float(np.hypot(ref['a'][0] - ref['b'][0], ref['a'][1] - ref['b'][1]))
+    if length < 0.1 * max(w, h):
+        flags.append('reference segment is short (under 10% of the photo), so a small click error changes the scale a lot')
+    margin = 0.05 * max(w, h)
+    if any(q[0] - x0 < margin or x0 + w - q[0] < margin or q[1] - y0 < margin or y0 + h - q[1] < margin for q in (ref['a'], ref['b'])):
+        flags.append('reference end near the photo edge, where lens distortion is strongest')
+    image = imread(Path(job) / frame['after'])
+    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+    sx, sy = image.shape[1] / w, image.shape[0] / h
+    r = max(4, int(0.01 * max(image.shape[:2])))
+    for q in (ref['a'], ref['b']):
+        cx, cy = int((q[0] - x0) * sx), int((q[1] - y0) * sy)
+        patch = gray[max(0, cy - r):cy + r, max(0, cx - r):cx + r]
+        if patch.size and float(cv2.Laplacian(patch, cv2.CV_64F).var()) < 15:
+            flags.append('a reference end sits on a featureless spot; check it is on a clear mark')
+            break
+    for f in ('blurry', 'tilted'):
+        if f in frame_flags:
+            flags.append('photo looks %s, so the scale is less certain' % f)
+    return flags, length
+
+
+def geometry_per_image(job, merged, labels, calibration):
+    """Each photo is scaled by its own measured distance; photos are placed side by side."""
+    corr = stage_result(job, 'correction')
+    frames = {f['id']: f for f in corr['frames']}
+    info = {f['id']: f for f in stage_result(job, 'frames')['frames']}
+    refs = {}
+    for r in calibration.get('references', []):
+        if r.get('confirmed', True) and r.get('metres', 0) > 0 and r.get('frame') in frames:
+            refs[r['frame']] = r                      # one calibration per photo; the last one wins
+    images, missing = [], []
+    for fid, f in frames.items():
+        r = refs.get(fid)
+        if not r:
+            missing.append(info.get(fid, {}).get('source') or fid)
+            continue
+        flags, length = calibration_flags(job, f, f['tile'], r, info.get(fid, {}).get('flags', []))
+        images.append({'frame': fid, 'source': info.get(fid, {}).get('source'), 'tile': f['tile'], 'reference': r['id'], 'metres': r['metres'],
+                       'label': r.get('label') or '', 'segment_px': round(length, 1), 'm_per_px': r['metres'] / length if length else None, 'flags': flags,
+                       'a': r['a'], 'b': r['b']})
+    images = [i for i in images if i['m_per_px']]
+    if not images:
+        return {'status': 'needs_review', 'summary': 'Waiting for scale. Calibrate at least one photo with a measured distance in Scale calibration.',
+                'scale': None, 'features': [], 'warnings': ['Without a calibrated photo there is no scale, so no map geometry is produced.']}
+    # Re-render every calibrated photo at one common scale, side by side, so the
+    # review map can use a single metres-per-pixel. Each photo keeps its own scale.
+    m_common = float(np.median([i['m_per_px'] for i in images]))
+    widths = [i['tile'][2] * i['m_per_px'] / m_common for i in images]
+    heights = [i['tile'][3] * i['m_per_px'] / m_common for i in images]
+    gap = 0.05 * max(widths)
+    total_w, total_h = sum(widths) + gap * (len(images) - 1), max(heights)
+    shrink = min(1.0, SHEET_MAX / max(total_w, total_h))
+    m_common /= shrink
+    sheet_img = imread(Path(job) / corr['mosaic']['image'])
+    W, H_ = int(math.ceil(total_w * shrink)) + 1, int(math.ceil(total_h * shrink)) + 1
+    canvas = np.full((H_, W, 3), 32, np.uint8)
+    x = 0.0
+    for i in images:
+        tx, ty, tw, th = i['tile']
+        k = i['m_per_px'] / m_common                 # sheet px -> map px for this photo
+        w, h = max(1, int(round(tw * k))), max(1, int(round(th * k)))
+        x0 = int(round(x))
+        piece = cv2.resize(sheet_img[ty:ty + th, tx:tx + tw], (w, h), interpolation=cv2.INTER_AREA if k < 1 else cv2.INTER_LINEAR)
+        canvas[0:min(h, H_), x0:x0 + min(w, W - x0)] = piece[:min(h, H_), :min(w, W - x0)]
+        i['map_offset_px'] = [x0, 0]
+        i['k'] = k
+        x += w + gap * shrink
+    out = stage_dir(job, 'geometry')
+    cv2.imwrite(str(out / 'map.jpg'), canvas, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    by_frame = {i['frame']: i for i in images}
+    features, skipped = [], 0
+    for g in merged['merged']:
+        i = by_frame.get(g['frames'][0]) if g['frames'] else None
+        if i is None:
+            skipped += 1
+            continue
+        tx, ty = i['tile'][:2]
+        to_m = lambda q: [((q[0] - tx) * i['k'] + i['map_offset_px'][0]) * m_common, ((q[1] - ty) * i['k'] + i['map_offset_px'][1]) * m_common]
+        poly = np.array([to_m(q) for q in g['polygon']], dtype=np.float64)
+        kind = g['kind'] or 'unknown'
+        geometry = labels.get(kind, {}).get('geometry', 'area')
+        p, width, note = shape_of(poly, geometry)
+        a, b = to_m(i['a']), to_m(i['b'])
+        segment_m = i['metres']
+        distance = segment_distance(poly.mean(axis=0), a, b)
+        flags = [f for f in g['flags'] if f != 'seen in one frame only'] + ([] if g['kind'] else ['needs label'])
+        photo_w_m = i['tile'][2] * i['m_per_px']
+        if distance > max(3 * segment_m, 0.25 * photo_w_m):
+            flags.append('far from its photo\'s reference segment (%.0f m away); size less certain' % distance)
+        features.append({'id': g['id'], 'kind': kind, 'predicted_kind': g['kind'], 'geometry': geometry, 'p': p,
+                         'region': poly.tolist(), 'width_m': width, 'pixel_polygon': g['polygon'], 'confidence': g['confidence'],
+                         'frames': g['frames'], 'flags': flags, 'note': note, 'area_m2': round(polygon_area(poly), 2),
+                         'image': {'frame': i['frame'], 'source': i['source']},
+                         'calibration': {'id': i['reference'], 'metres': round(i['metres'], 4), 'label': i['label'], 'segment_px': i['segment_px'],
+                                         'm_per_px': round(i['m_per_px'], 6), 'distance_from_reference_m': round(distance, 2), 'flags': i['flags']}})
+    features.sort(key=lambda f: f['kind'] not in BASE_KINDS)    # base surfaces first, features on top after
+    warnings = ['Locally scaled, unreferenced: each photo has its own scale from one measured distance and its own arbitrary origin. Photos are placed side by side; their real positions relative to each other are unknown. North is unknown, and perspective, terrain, tilt and lens effects are not removed.',
+                'One distance calibrates scale near the measured segment. Sizes further away in the same photo are approximate.']
+    if missing:
+        warnings.append('Not calibrated, so left out of the map: %s.' % ', '.join(missing))
+    for i in images:
+        for f in i['flags']:
+            warnings.append('%s: %s.' % (i['source'] or i['frame'], f))
+    for i in images:
+        for key in ('k', 'a', 'b'):
+            i.pop(key, None)
+    return {'status': 'needs_review', 'summary': '%d proposed features from %d calibrated photo(s)%s' % (len(features), len(images), ', %d photo(s) not calibrated' % len(missing) if missing else ''),
+            'scale': {'mode': 'per-image', 'm_per_px': m_common, 'origin_px': [0, 0], 'markers': 0, 'references': len(images), 'spread': None, 'images': images},
+            'extent_m': [round(W * m_common, 2), round(H_ * m_common, 2)], 'mosaic': {'image': rel(job, out / 'map.jpg'), 'width': W, 'height': H_},
+            'features': features, 'warnings': warnings}
+
+
 def stage_geometry(job):
     need_cv()
     merged = stage_result(job, 'merging')
     labels = {l['kind']: l for l in read_json(Path(job) / 'labels.json', {'labels': []})['labels']}
     calibration = read_json(Path(job) / 'calibration.json', {'markers': []})
+    if merged.get('layout') == 'sheet':
+        return geometry_per_image(job, merged, labels, calibration)
     side_m = float(calibration.get('markerSideM') or MARKER_SIDE_M)
     confirmed = [m for m in calibration.get('markers', []) if m.get('confirmed') and len(m.get('corners', [])) == 4]
     references = [r for r in calibration.get('references', []) if r.get('confirmed', True) and r.get('metres', 0) > 0]
@@ -999,28 +1269,13 @@ def stage_geometry(job):
         poly = np.array(g['polygon'], dtype=np.float64) * m_per_px
         kind = g['kind'] or 'unknown'
         geometry = labels.get(kind, {}).get('geometry', 'area')
-        note, width = None, None
-        if geometry == 'point':
-            M = cv2.moments(poly.astype(np.float32))
-            p = [[M['m10'] / M['m00'], M['m01'] / M['m00']]] if M['m00'] else [poly.mean(axis=0).tolist()]
-            note = 'Point placed at the region centroid.'
-        elif geometry == 'line':
-            (cx, cy), (w, h), angle = cv2.minAreaRect(poly.astype(np.float32))
-            length, a = (w, angle) if w >= h else (h, angle + 90)
-            dx, dy = math.cos(math.radians(a)) * length / 2, math.sin(math.radians(a)) * length / 2
-            p = [[cx - dx, cy - dy], [cx + dx, cy + dy]]
-            width = round(float(min(w, h)), 2)
-            note = 'Line approximated by the long axis of the region; width is %.1f m.' % width
-        else:
-            p = poly.tolist()
-        if width is None and geometry != 'point':
-            (_, _), (w, h), _ = cv2.minAreaRect(poly.astype(np.float32))
-            width = round(float(min(w, h)), 2)
+        p, width, note = shape_of(poly, geometry)
         features.append({'id': g['id'], 'kind': kind, 'predicted_kind': g['kind'], 'geometry': geometry, 'p': p,
                          'region': poly.tolist(), 'width_m': width,
                          'pixel_polygon': g['polygon'], 'confidence': g['confidence'], 'frames': g['frames'],
                          'flags': g['flags'] + ([] if g['kind'] else ['needs label']), 'note': note,
                          'area_m2': round(polygon_area(poly), 2)})
+    features.sort(key=lambda f: f['kind'] not in BASE_KINDS)    # base surfaces first, features on top after
     allp = np.concatenate([np.array(f['p']) for f in features]) if features else np.zeros((1, 2))
     origin = allp.min(axis=0) - 2
     for f in features:

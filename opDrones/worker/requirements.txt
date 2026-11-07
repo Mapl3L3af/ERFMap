@@ -3,3 +3,5 @@ numpy>=1.24
 opencv-python-headless>=4.8
 # Optional: reads camera, time and GPS-present flags from photo EXIF.
 pillow>=10
+# Optional: free zero-shot classifier (CLIP). Large download (PyTorch).
+# open_clip_torch>=2.24

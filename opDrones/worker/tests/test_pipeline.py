@@ -5,6 +5,7 @@
 Needs FFmpeg on PATH and the packages in worker/requirements.txt.
 """
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -33,7 +34,8 @@ class PipelineTest(unittest.TestCase):
         shutil.rmtree(cls.job, ignore_errors=True)
 
     def run_stage(self, stage):
-        out = subprocess.run([sys.executable, str(WORKER), 'run', stage, str(self.job)], capture_output=True, text=True, check=True)
+        env = {**os.environ, 'ERFMAP_CLASSIFIER': 'off'}   # keep the test offline even when the CLIP classifier is installed
+        out = subprocess.run([sys.executable, str(WORKER), 'run', stage, str(self.job)], capture_output=True, text=True, check=True, env=env)
         return json.loads(out.stdout.strip().splitlines()[-1])
 
     def test_pipeline(self):
@@ -59,8 +61,12 @@ class PipelineTest(unittest.TestCase):
         self.assertTrue(geometry['features'])
 
 
+def polygon_px_area(points):
+    return abs(sum(points[i][0] * points[(i + 1) % len(points)][1] - points[(i + 1) % len(points)][0] * points[i][1] for i in range(len(points)))) / 2
+
+
 class PhotoPipelineTest(unittest.TestCase):
-    """A handful of stills in shuffled order, scaled by one measured distance."""
+    """A handful of stills in shuffled order, each scaled by its own measured distance."""
     @classmethod
     def setUpClass(cls):
         cls.job = Path(tempfile.mkdtemp())
@@ -91,18 +97,39 @@ class PhotoPipelineTest(unittest.TestCase):
         self.assertEqual(sum(f['usable'] for f in frames), 4, 'only the blurred still should be dropped')
         self.assertEqual(self.run_stage('correction')['status'], 'complete')
         correction = json.loads((self.job / 'stages/correction/result.json').read_text())
-        self.assertIn('4 of them aligned', correction['summary'])
-        for stage in ('markers', 'regions', 'classification', 'merging'):
+        self.assertEqual(correction['layout'], 'sheet', 'photos are laid out side by side, not stitched')
+        tiles = {f['id']: f['tile'] for f in correction['frames']}
+        self.assertEqual(len(tiles), 4)
+        self.assertEqual(self.run_stage('markers')['status'], 'needs_review')
+        for stage in ('regions', 'classification', 'merging'):
             self.run_stage(stage)
-        # A 10 m tape along the preview's x axis. Ground truth is 120 px/m, frames are scaled 0.8, then the mosaic scale.
+        # Each photo gets its own 10 m reference. Ground truth is 120 px/m, frames are scaled 0.8, then the sheet scale.
         px_per_m = 120 * 0.8 * correction['mosaic']['scale']
-        ref = {'id': 'D1', 'a': [100, 200], 'b': [100 + 10 * px_per_m, 200], 'metres': 10, 'confirmed': True}
-        (self.job / 'calibration.json').write_text(json.dumps({'markers': [], 'references': [ref], 'markerSideM': 0.3048}))
+        ids = sorted(tiles)
+        refs = []
+        for n, fid in enumerate(ids[:3]):                 # the last photo stays uncalibrated
+            x, y, w, h = tiles[fid]
+            metres = 5 if n == 2 else 10                  # photo 3 is given a deliberately different scale
+            refs.append({'id': 'D%d' % (n + 1), 'frame': fid, 'a': [x + 0.2 * w, y + 0.5 * h], 'b': [x + 0.2 * w + 10 * px_per_m, y + 0.5 * h], 'metres': metres, 'confirmed': True})
+        (self.job / 'calibration.json').write_text(json.dumps({'markers': [], 'references': refs, 'markerSideM': 0.3048}))
         self.run_stage('geometry')
         geometry = json.loads((self.job / 'stages/geometry/result.json').read_text())
-        self.assertAlmostEqual(geometry['scale']['m_per_px'] * px_per_m, 1, places=6)
-        self.assertEqual(geometry['scale']['references'], 1)
-        self.assertTrue(geometry['features'])
+        scale = geometry['scale']
+        self.assertEqual(scale['mode'], 'per-image')
+        per = {i['frame']: i['m_per_px'] for i in scale['images']}
+        self.assertEqual(set(per), set(ids[:3]))
+        self.assertAlmostEqual(per[ids[0]] * px_per_m, 1, places=6)
+        self.assertAlmostEqual(per[ids[2]] * px_per_m, 0.5, places=6, msg='each photo keeps its own scale')
+        source = next(f['source'] for f in frames if f['id'] == ids[3])
+        self.assertTrue(any(source in w for w in geometry['warnings']), 'the uncalibrated photo is reported')
+        features = geometry['features']
+        self.assertTrue(features)
+        self.assertFalse([f for f in features if f['frames'][0] == ids[3]], 'no features from the uncalibrated photo')
+        for f in features:
+            m = per[f['image']['frame']]
+            self.assertEqual(f['calibration']['id'], next(r['id'] for r in refs if r['frame'] == f['image']['frame']))
+            if f['geometry'] == 'area':
+                self.assertAlmostEqual(f['area_m2'], polygon_px_area(f['pixel_polygon']) * m * m, delta=0.02 * f['area_m2'] + 0.05)
 
 
 if __name__ == '__main__':
