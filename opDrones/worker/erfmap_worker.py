@@ -898,9 +898,8 @@ def stage_regions(job):
 
 
 # ---------------------------------------------------------------- 5. classification
-# Grass and bushes are only mapped as large blocks: smaller regions of those kinds are omitted.
-LARGE_ONLY = {'grass', 'bush'}
-LARGE_MIN_FRACTION = 0.02
+# Touching grass regions are joined into one block per photo (or per preview for video).
+LARGE_ONLY = {'grass'}
 
 
 def stage_classification(job):
@@ -940,30 +939,6 @@ def stage_classification(job):
     def kind_of(r):
         label = by_id.get(r['id'], {}).get('label') or by_id.get(r['id'], {}).get('kind')
         return label, label_map.get(label, label)
-    # Grass and bushes count as large blocks: touching regions of the same kind in
-    # a frame are joined, and only blocks of at least LARGE_MIN_FRACTION are kept.
-    block_ok = {}
-    for fid, image in images.items():
-        h, w = image.shape[:2]
-        gap = max(3, int(0.01 * max(h, w)))
-        for big in LARGE_ONLY:
-            members = [r for r in reg['regions'] if r['frame'] == fid and kind_of(r)[1] == big]
-            if not members:
-                continue
-            mask = np.zeros((h, w), np.uint8)
-            for r in members:
-                cv2.fillPoly(mask, [np.array(r['polygon'], dtype=np.int32)], 255)
-            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((gap, gap), np.uint8))
-            count, comp, stats, _ = cv2.connectedComponentsWithStats(mask)
-            for r in members:
-                x, y = np.array(r['polygon'], dtype=np.int32).mean(axis=0).astype(int)
-                inside = comp[min(max(y, 0), h - 1), min(max(x, 0), w - 1)]
-                if inside == 0:          # centroid outside its own polygon: use its largest overlap
-                    one = np.zeros((h, w), np.uint8)
-                    cv2.fillPoly(one, [np.array(r['polygon'], dtype=np.int32)], 1)
-                    ids, n = np.unique(comp[one > 0], return_counts=True)
-                    inside = ids[np.argmax(n * (ids > 0))] if len(ids) else 0
-                block_ok[r['id']] = inside > 0 and stats[inside, cv2.CC_STAT_AREA] >= LARGE_MIN_FRACTION * h * w
     predictions, unmapped, omitted = [], set(), 0
     for r in reg['regions']:
         p = by_id.get(r['id'], {})
@@ -971,8 +946,6 @@ def stage_classification(job):
         reason = None
         if model_label == 'omit':
             reason = 'not one of the mapped kinds'
-        elif kind in LARGE_ONLY and not block_ok.get(r['id'], False):
-            reason = '%s is only mapped in large blocks (at least %d%% of the frame)' % (kind, round(LARGE_MIN_FRACTION * 100))
         if reason:
             omitted += 1
             predictions.append({'id': r['id'], 'kind': None, 'model_label': model_label, 'confidence': p.get('confidence'), 'needs_review': False, 'omit': True, 'omit_reason': reason})
@@ -990,7 +963,7 @@ def stage_classification(job):
     if reply.get('model', {}).get('heuristic'):
         warnings.append('The configured classifier reports itself as a heuristic, not a trained model.')
     uncertain = sum(p['needs_review'] for p in predictions)
-    return {'status': 'needs_review' if uncertain else 'complete', 'summary': '%d regions classified, %d omitted, %d need review' % (len(predictions) - omitted, omitted, uncertain),
+    return {'status': 'needs_review' if uncertain else 'complete', 'summary': '%d regions classified%s, %d need review' % (len(predictions) - omitted, ', %d omitted' % omitted if omitted else '', uncertain),
             'model': reply.get('model'), 'predictions': predictions, 'uncertain_below': UNCERTAIN_BELOW, 'warnings': warnings}
 
 

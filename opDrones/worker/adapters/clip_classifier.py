@@ -24,25 +24,19 @@ import json
 import os
 import sys
 
-# The only erfMap kinds this classifier assigns. Edit this to change the set.
+# The only erfMap kinds this classifier assigns. Every region gets the closest
+# of these; nothing is left out. Edit this to change the set.
 PROMPTS = {
-    'grass': ['a lawn', 'mowed grass', 'a grassy field'],
-    'water': ['a lake', 'a pond', 'water'],
-    'road': ['an asphalt road', 'a parking lot', 'an asphalt driveway'],
-    'path': ['a concrete sidewalk', 'a footpath', 'a paved walkway'],
-    'tree': ['a tree', 'a tree crown', 'bare tree branches'],
-    'bush': ['bushes', 'shrubs', 'a hedge'],
     'building': ['a building roof', 'a rooftop', 'a house roof'],
+    'grass': ['a lawn', 'mowed grass', 'a grassy field'],
+    'tree': ['a tree', 'a tree crown', 'bare tree branches'],
+    'path': ['a concrete sidewalk', 'a footpath', 'a paved walkway'],
+    'road': ['an asphalt road', 'a parking lot', 'an asphalt driveway'],
     'light': ['a lamp post', 'a street light seen from above'],
     'bench': ['a park bench', 'a bench'],
 }
-# Things that are none of the above. A region that matches these best is
-# omitted from the map instead of being forced into a kind.
-OMIT = 'omit'
-OTHER = ['a person', 'fallen leaves', 'a car', 'bare dirt', 'a shadow', 'a rock', 'a manhole cover',
-         'a white sign on the ground', 'a window', 'a wall']
 TEMPLATES = ['an aerial photo of {}.', 'a top-down drone photo of {}.']
-MIN_SIDE = 12       # px; smaller crops carry too little to classify
+MIN_SIDE = 4        # px; anything smaller has no pixels to compare
 
 
 def main():
@@ -54,7 +48,7 @@ def main():
 
     available = {l['kind'] for l in request['labels']}
     kinds = [k for k in PROMPTS if k in available]
-    prompts = {**{k: PROMPTS[k] for k in kinds}, OMIT: OTHER}
+    prompts = {k: PROMPTS[k] for k in kinds}
     classes = list(prompts)
     name = os.environ.get('ERFMAP_CLIP_MODEL', 'ViT-B-32')
     weights = os.environ.get('ERFMAP_CLIP_PRETRAINED', 'laion2b_s34b_b79k')
