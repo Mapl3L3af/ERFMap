@@ -25,17 +25,17 @@ const pct = v => v == null ? '—' : Math.round(v * 100) + '%';
 // ---------------------------------------------------------------- home
 async function home() {
     document.getElementById('newJob').hidden = true;
-    app.innerHTML = '<div class="home"><section class="card"><small class="cap">Step 1 · Video intake</small><h2>Upload drone video</h2>'
-        + '<p>Fly a steady, mostly straight-down pass with plenty of overlap. Place several high-contrast <b>1 ft × 1 ft</b> square boards around the site before flying; the outer edge of each board is the 1 ft square. GPS is not needed and not used.</p>'
-        + '<div class="drop" id="drop"><p><b>Drop a video here</b> or</p><label class="button primary">Choose video<input type="file" id="video" accept="video/*,.mp4,.mov,.mkv,.avi,.webm,.mts" hidden></label><p class="cap" id="uploadName"></p><div class="bar" id="uploadBar" hidden><i style="width:0"></i></div></div>'
+    app.innerHTML = '<div class="home"><section class="card"><small class="cap">Step 1 · Intake</small><h2>Upload drone video or photos</h2>'
+        + '<p>Upload one video, or one or more photos. Shoot as straight down as you can, with plenty of overlap (about 60% between neighbouring photos). For scale, include something you measured on the ground: a tape measure laid out flat, two cones a known distance apart, or square boards of known size. GPS is not needed and not used.</p>'
+        + '<div class="drop" id="drop"><p><b>Drop a video or photos here</b> or</p><label class="button primary">Choose files<input type="file" id="video" multiple accept="video/*,image/*,.mp4,.mov,.mkv,.avi,.webm,.mts,.jpg,.jpeg,.png,.tif,.tiff,.webp" hidden></label><p class="cap" id="uploadName"></p><div class="bar" id="uploadBar" hidden><i style="width:0"></i></div></div>'
         + '<p id="uploadStatus" role="status"></p>'
         + '<div class="note warn">The result is a <b>locally scaled, unreferenced</b> map: metres from an arbitrary origin, with no north and no world coordinates. Perspective, terrain, camera tilt and blur can still distort it. It is not survey-grade.</div></section>'
         + '<section class="card"><small class="cap">Processing worker</small><h2>What can run here</h2><div id="caps"><p>Checking the worker…</p></div><h3>Recent intake jobs</h3><ul class="jobs" id="jobs"><li>Loading…</li></ul></section></div>';
     const input = document.getElementById('video'), drop = document.getElementById('drop');
-    input.onchange = () => input.files[0] && upload(input.files[0]);
+    input.onchange = () => input.files.length && upload([...input.files]);
     drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
     drop.ondragleave = () => drop.classList.remove('over');
-    drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); if (e.dataTransfer.files[0]) upload(e.dataTransfer.files[0]); };
+    drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); if (e.dataTransfer.files.length) upload([...e.dataTransfer.files]); };
     api('/api/intake/capabilities').then(renderCaps).catch(e => document.getElementById('caps').innerHTML = '<p class="no">' + esc(e.message) + '</p>');
     api('/api/intake/jobs').then(list => {
         document.getElementById('jobs').innerHTML = list.length ? list.map(j => {
@@ -61,21 +61,45 @@ function renderCaps(c) {
         + row('Elevation', false, 'no elevation model connected; exports are flat and contours are unavailable', true)
         + '</ul>';
 }
-function upload(file) {
-    document.getElementById('uploadName').textContent = file.name + ' · ' + (file.size / 1048576).toFixed(1) + ' MB';
+function send(url, file, onProgress) {
+    return new Promise((resolve, reject) => {
+        const xhr = new XMLHttpRequest();
+        xhr.open('POST', url);
+        xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
+        xhr.upload.onprogress = e => e.lengthComputable && onProgress(e.loaded);
+        xhr.onload = () => {
+            let data = {}; try { data = JSON.parse(xhr.responseText); } catch { /* not JSON */ }
+            xhr.status >= 300 ? reject(Error(data.error || 'Upload failed.')) : resolve(data);
+        };
+        xhr.onerror = () => reject(Error('Upload failed. Is the erfMap server still running?'));
+        xhr.send(file);
+    });
+}
+async function upload(files) {
     const bar = document.getElementById('uploadBar'), status = document.getElementById('uploadStatus');
+    const isVideo = f => /^video\//.test(f.type) || /\.(mp4|mov|m4v|avi|mkv|webm|mts|m2ts|3gp)$/i.test(f.name);
+    const isPhoto = f => /^image\//.test(f.type) || /\.(jpe?g|png|tiff?|webp|bmp)$/i.test(f.name);
+    const videos = files.filter(isVideo), photos = files.filter(isPhoto).sort((a, b) => a.name.localeCompare(b.name, undefined, {numeric: true}));
+    if (videos.length && photos.length || videos.length > 1 || videos.length + photos.length !== files.length) {
+        status.textContent = 'Choose either one video, or one or more photos (JPEG, PNG, TIFF or WebP).'; return;
+    }
+    const list = videos.length ? videos : photos, total = list.reduce((s, f) => s + f.size, 0);
+    document.getElementById('uploadName').textContent = (videos.length ? list[0].name : list.length + ' photo' + (list.length > 1 ? 's' : '')) + ' · ' + (total / 1048576).toFixed(1) + ' MB';
     bar.hidden = false;
-    const xhr = new XMLHttpRequest();
-    xhr.open('POST', '/api/intake/jobs?name=' + encodeURIComponent(file.name));
-    xhr.setRequestHeader('Content-Type', file.type || 'application/octet-stream');
-    xhr.upload.onprogress = e => { if (e.lengthComputable) bar.firstElementChild.style.width = (100 * e.loaded / e.total) + '%'; status.textContent = 'Uploading… the original file is kept unchanged.'; };
-    xhr.onload = () => {
-        let data = {}; try { data = JSON.parse(xhr.responseText); } catch { /* not JSON */ }
-        if (xhr.status >= 300) { status.textContent = data.error || 'Upload failed.'; return; }
-        location.assign('?job=' + data.id);
-    };
-    xhr.onerror = () => { status.textContent = 'Upload failed. Is the erfMap server still running?'; };
-    xhr.send(file);
+    let done = 0;
+    const progress = loaded => { bar.firstElementChild.style.width = (100 * (done + loaded) / total) + '%'; };
+    try {
+        status.textContent = 'Uploading… originals are kept unchanged.';
+        const created = await send('/api/intake/jobs?name=' + encodeURIComponent(list[0].name) + (photos.length ? '&defer=1' : ''), list[0], progress);
+        done += list[0].size;
+        for (const [i, file] of list.slice(1).entries()) {
+            status.textContent = 'Uploading photo ' + (i + 2) + ' of ' + list.length + '…';
+            await send('/api/intake/jobs/' + created.id + '/originals?name=' + encodeURIComponent(file.name), file, progress);
+            done += file.size;
+        }
+        if (photos.length) await api('/api/intake/jobs/' + created.id + '/start', {method: 'POST'});
+        location.assign('?job=' + created.id);
+    } catch (e) { status.textContent = e.message; }
 }
 
 // ---------------------------------------------------------------- job page
@@ -96,7 +120,10 @@ function update(next) {
         const order = S.STAGES.map(s => s.id);
         selected = params.get('stage') && order.includes(params.get('stage')) ? params.get('stage')
             : order.find(s => ['processing', 'failed', 'needs_review'].includes(job.stages[s].status) && s !== 'review') || order.find(s => job.stages[s].status === 'needs_review') || order[0];
-        document.getElementById('original').innerHTML = '<small class="cap">Original video (kept unchanged)</small><p>' + esc(job.original.name) + '<br><span class="cap">' + (job.original.size / 1048576).toFixed(1) + ' MB · uploaded ' + new Date(job.createdAt).toLocaleString() + '</span></p><a class="button" href="' + fileUrl(job.original.path) + '" download>Download original</a>';
+        const originals = job.originals || [job.original];
+        document.getElementById('original').innerHTML = job.media === 'photos'
+            ? '<small class="cap">Original photos (kept unchanged)</small><p>' + originals.length + ' photo' + (originals.length > 1 ? 's' : '') + ' · ' + (originals.reduce((s, o) => s + o.size, 0) / 1048576).toFixed(1) + ' MB</p><details><summary>Files</summary><ul>' + originals.map(o => '<li><a href="' + fileUrl(o.path) + '" download>' + esc(o.name) + '</a></li>').join('') + '</ul></details>'
+            : '<small class="cap">Original video (kept unchanged)</small><p>' + esc(job.original.name) + '<br><span class="cap">' + (job.original.size / 1048576).toFixed(1) + ' MB · uploaded ' + new Date(job.createdAt).toLocaleString() + '</span></p><a class="button" href="' + fileUrl(job.original.path) + '" download>Download original</a>';
     }
     renderStages();
     const state = job.stages[selected];
@@ -168,6 +195,10 @@ const stageData = async id => results[id] || (results[id] = await api('/api/inta
 // ---------------------------------------------------------------- stage views
 function viewProbe(body, data) {
     const m = data.metadata || {};
+    if (m.media === 'photos') {
+        body.innerHTML = '<div class="grid">' + m.photos.map(p => '<figure class="thumb" style="margin:0;cursor:default"><img loading="lazy" src="' + fileUrl(p.path) + '" alt=""><div><b>' + esc(p.name) + '</b><br>' + p.width + ' × ' + p.height + (p.exif ? '<br><span class="cap">' + esc([p.exif.Make, p.exif.Model].filter(Boolean).join(' ') || 'no camera tags') + (p.exif.DateTimeOriginal ? ' · ' + esc(p.exif.DateTimeOriginal) : '') + (p.exif.GPSInfo ? ' · GPS tag (unused)' : '') + '</span>' : '') + '</div></figure>').join('') + '</div>';
+        return;
+    }
     const rows = [['Container', m.container], ['Duration', m.duration_s?.toFixed(2) + ' s'], ['Resolution', m.width + ' × ' + m.height], ['Frame rate', m.fps?.toFixed(3) + ' fps'], ['Frames', m.frame_count], ['Codec', m.codec], ['Pixel format', m.pixel_format], ['Rotation', m.rotation ?? 'none'], ['Recorded', m.creation_time || 'not recorded'], ['Telemetry streams', (m.data_streams || []).join(', ') || 'none']];
     body.innerHTML = '<div class="split"><div><video controls preload="metadata" style="width:100%;border-radius:8px;background:#000" src="' + fileUrl(job.original.path) + '"></video><p class="cap">Browsers cannot play every drone codec; the original file is kept either way.</p></div><div><h3>Video</h3><table class="kv">' + rows.map(([k, v]) => '<tr><td>' + k + '</td><td>' + esc(v ?? '—') + '</td></tr>').join('') + '</table>'
         + '<h3>Camera tags</h3><table class="kv">' + (Object.entries(m.camera_tags || {}).map(([k, v]) => '<tr><td>' + esc(k) + '</td><td>' + esc(v) + '</td></tr>').join('') || '<tr><td colspan=2>None in this file.</td></tr>') + '</table>'
@@ -179,7 +210,7 @@ function viewFrames(body, data) {
     const draw = () => {
         const list = data.frames.filter(f => filter === 'all' || (filter === 'usable') === f.usable);
         const m = current.metrics;
-        body.innerHTML = '<p>Frames sampled at ' + data.sample_fps.toFixed(2) + ' per second. Blur limit: sharpness below ' + data.blur_limit + '. Flagged frames are left out of later stages.</p>'
+        body.innerHTML = '<p>' + (data.sample_fps ? 'Frames sampled at ' + data.sample_fps.toFixed(2) + ' per second.' : 'Each uploaded photo is one frame, scaled to at most 2000 px.') + ' Blur limit: sharpness below ' + data.blur_limit + '. Flagged frames are left out of later stages.</p>'
             + '<div class="split"><figure style="margin:0"><img style="width:100%;border-radius:8px" src="' + fileUrl(current.image) + '" alt="Frame ' + current.id + '"><figcaption>' + current.id + ' · ' + current.time_s + ' s</figcaption></figure>'
             + '<div><h3>' + current.id + ' ' + (current.usable ? '<span class="flag good">usable</span>' : flags(current.flags, [''])) + '</h3><table class="kv"><tr><td>Sharpness</td><td>' + m.sharpness + '</td></tr><tr><td>Brightness</td><td>' + m.brightness + '</td></tr><tr><td>Contrast</td><td>' + m.contrast + '</td></tr><tr><td>Edge texture</td><td>' + m.texture + '</td></tr><tr><td>Sky band (tilt)</td><td>' + (m.sky_band ? 'yes' : 'no') + '</td></tr></table></div></div>'
             + '<div class="row" style="margin:12px 0">' + ['all', 'usable', 'flagged'].map(f => '<button type="button" data-filter="' + f + '" class="' + (f === filter ? 'primary' : '') + '">' + f[0].toUpperCase() + f.slice(1) + ' (' + data.frames.filter(x => f === 'all' || (f === 'usable') === x.usable).length + ')</button>').join('') + '</div>'
@@ -200,7 +231,7 @@ function viewCorrection(body, data) {
     body.innerHTML = '<table class="kv"><tr><td>Cleanup</td><td>' + esc(data.cleanup) + ' <span class="flag good">applied</span></td></tr><tr><td>Lens correction</td><td>' + esc(data.lens.reason) + ' <span class="flag ' + (data.lens.status === 'applied' ? 'good' : 'bad') + '">' + data.lens.status + '</span></td></tr><tr><td>Alignment</td><td>' + okLinks + ' of ' + data.links.length + ' frame pairs matched (ORB features + RANSAC homography); reference frame ' + data.reference + '</td></tr></table>'
         + '<h3>Before and after cleanup</h3><div class="row" id="strip" style="overflow-x:auto;flex-wrap:nowrap;padding-bottom:6px">' + data.frames.map(f => '<button type="button" class="thumb" style="flex:0 0 110px" data-cframe="' + f.id + '"><img loading="lazy" src="' + fileUrl(f.after) + '" alt=""><div>' + f.id + (f.to_mosaic ? '' : ' <span class="flag bad">unaligned</span>') + '</div></button>').join('') + '</div><div class="compare" id="compare"></div>'
         + '<h3>Alignment preview</h3><p>Aligned frames stitched onto the reference frame with planar homographies. This is a preview for checking overlap, not an orthomosaic.</p><div id="mosaic"></div>'
-        + '<details><summary>Frame-pair matches</summary><table><tr><th>From</th><th>To</th><th>Inliers</th><th></th></tr>' + data.links.map(l => '<tr><td>' + l.from + '</td><td>' + l.to + '</td><td>' + l.inliers + '</td><td>' + (l.ok ? '<span class="flag good">aligned</span>' : '<span class="flag bad">weak match</span>') + '</td></tr>').join('') + '</table></details>';
+        + '<details><summary>Frame-pair matches</summary><table><tr><th>From</th><th>To</th><th>Inliers</th><th></th></tr>' + data.links.map(l => '<tr><td>' + l.from + '</td><td>' + (l.to || 'no match') + '</td><td>' + l.inliers + '</td><td>' + (l.ok ? '<span class="flag good">aligned</span>' : '<span class="flag bad">weak match</span>') + '</td></tr>').join('') + '</table></details>';
     const compare = () => {
         document.getElementById('compare').innerHTML = '<figure><img src="' + fileUrl(current.before) + '" alt="Before"><figcaption>Before · extracted frame ' + current.id + '</figcaption></figure><figure><img src="' + fileUrl(current.after) + '" alt="After"><figcaption>After · cleanup' + (data.lens.status === 'applied' ? ' and lens correction' : ' (lens correction unavailable)') + '</figcaption></figure>';
         document.querySelectorAll('[data-cframe]').forEach(b => b.setAttribute('aria-pressed', b.dataset.cframe === current.id));
@@ -211,17 +242,31 @@ function viewCorrection(body, data) {
 }
 
 // ---- scale calibration
-function markerScale(m) {
-    const c = m.corners, side = [0, 1, 2, 3].reduce((s, i) => s + Math.hypot(c[i][0] - c[(i + 1) % 4][0], c[i][1] - c[(i + 1) % 4][1]), 0) / 4;
-    return 0.3048 / side;
-}
+const UNITS = {ft: 0.3048, in: 0.0254, m: 1, cm: 0.01};
+const markerSide = m => { const c = m.corners; return [0, 1, 2, 3].reduce((s, i) => s + Math.hypot(c[i][0] - c[(i + 1) % 4][0], c[i][1] - c[(i + 1) % 4][1]), 0) / 4; };
+const refLength = r => Math.hypot(r.a[0] - r.b[0], r.a[1] - r.b[1]);
+const fmtLength = m => m >= 1 ? m.toFixed(2) + ' m (' + (m / 0.3048).toFixed(1) + ' ft)' : (m * 100).toFixed(1) + ' cm (' + (m / 0.0254).toFixed(1) + ' in)';
 async function viewMarkers(body, data) {
     const markers = JSON.parse(JSON.stringify(job.calibration?.markers || []));
+    const references = JSON.parse(JSON.stringify(job.calibration?.references || []));
+    let sideM = job.calibration?.markerSideM || 0.3048;
     const detected = Object.fromEntries((data.markers || []).map(m => [m.id, m]));
-    let active = markers[0]?.id || null, adding = null, dirty = false;
-    body.innerHTML = '<div class="note">Each confirmed 1 ft board sets the scale <b>near that board only</b>. Several boards spread across the site let erfMap use a median scale and show when boards disagree, which points to tilt, terrain relief or poor alignment. Results stay <b>locally scaled, unreferenced</b>.</div>'
-        + '<div class="split"><div id="mviewer"></div><div><div class="row"><button type="button" id="addMarker">Add marker by hand</button><button type="button" class="primary" id="saveMarkers">Save calibration</button></div><p id="mstatus" class="cap"></p><div class="list" id="mlist"></div><div id="mscale"></div></div></div>';
-    const v = viewer = createViewer(document.getElementById('mviewer'), {image: fileUrl(data.mosaic.image), width: data.mosaic.width, height: data.mosaic.height, hint: 'Select a marker, then drag its corners to correct them'});
+    let active = markers[0]?.id || null, adding = null, measuring = null, pendingRef = null, dirty = false;
+    body.innerHTML = '<div class="note">Scale comes from things of known size in the imagery. Use either or both:'
+        + '<br>• <b>Square marker boards.</b> Detected automatically; confirm or correct their corners. Set the board size below if yours are not 1 ft.'
+        + '<br>• <b>Measured distance.</b> Click two points you measured on the ground (tape ends, cones, a parking-space width) and enter the distance.'
+        + '<br>Each reference sets the scale <b>near itself only</b>. Several spread across the site let erfMap take a median and show when they disagree, which points to tilt, terrain relief or a mis-click. Results stay <b>locally scaled, unreferenced</b>.</div>'
+        + '<div class="split"><div id="mviewer"></div><div>'
+        + '<label class="row" style="margin-bottom:8px">Marker board side <input id="sideValue" type="number" min="0.01" step="any" style="width:90px"><select id="sideUnit"><option value="ft">ft</option><option value="in">in</option><option value="m">m</option><option value="cm">cm</option></select></label>'
+        + '<div class="row"><button type="button" id="measure">Measure a known distance</button><button type="button" id="addMarker">Add marker by hand</button></div>'
+        + '<div id="refForm" hidden class="card" style="margin-top:8px;padding:10px"><label>Distance between A and B <div class="row"><input id="refValue" type="number" min="0" step="any" style="width:110px"><select id="refUnit"><option value="ft">ft</option><option value="m">m</option><option value="in">in</option><option value="cm">cm</option></select></div></label><label>What is it? <input id="refLabel" placeholder="e.g. tape measure, parking space" style="width:100%"></label><div class="row" style="margin-top:6px"><button type="button" class="primary" id="refAdd">Add distance</button><button type="button" id="refCancel">Cancel</button></div></div>'
+        + '<div class="row" style="margin-top:8px"><button type="button" class="primary" id="saveMarkers">Save calibration</button></div><p id="mstatus" class="cap"></p><div class="list" id="mlist"></div><div id="mscale"></div></div></div>';
+    const v = viewer = createViewer(document.getElementById('mviewer'), {image: fileUrl(data.mosaic.image), width: data.mosaic.width, height: data.mosaic.height, hint: 'Scroll to zoom in before clicking points. Drag white handles to correct them.'});
+    const sideInput = document.getElementById('sideValue'), sideUnit = document.getElementById('sideUnit');
+    const showSide = () => { const unit = Math.abs(sideM / 0.3048 - Math.round(sideM / 0.3048)) < 1e-6 ? 'ft' : 'm'; sideUnit.value = unit; sideInput.value = +(sideM / UNITS[unit]).toFixed(4); };
+    showSide();
+    const estimates = () => [...markers.filter(m => m.confirmed).map(m => sideM / markerSide(m)), ...references.filter(r => r.confirmed !== false).map(r => r.metres / refLength(r))];
+    const label = (x, y, text, k) => '<text x="' + x + '" y="' + y + '" font-size="' + 12 * k + '" text-anchor="middle" fill="#fff" stroke="#000" stroke-width="' + 3 * k + '" paint-order="stroke">' + esc(text) + '</text>';
     const draw = () => {
         const k = v.scale;
         let s = '';
@@ -229,56 +274,94 @@ async function viewMarkers(body, data) {
             const colour = m.confirmed ? '#8ec26a' : m.flags?.length ? '#e0705f' : '#e8b04f';
             s += '<polygon points="' + pts(m.corners) + '" fill="' + colour + '" fill-opacity=".18" stroke="' + colour + '" stroke-width="' + (m.id === active ? 2.5 : 1.5) + '" vector-effect="non-scaling-stroke" data-marker="' + m.id + '"/>';
             const c = m.corners.reduce((a, p) => [a[0] + p[0] / 4, a[1] + p[1] / 4], [0, 0]);
-            s += '<text x="' + c[0] + '" y="' + (Math.min(...m.corners.map(p => p[1])) - 6 * k) + '" font-size="' + 12 * k + '" text-anchor="middle" fill="#fff" stroke="#000" stroke-width="' + 3 * k + '" paint-order="stroke">' + m.id + '</text>';
-            if (m.id === active) m.corners.forEach((p, i) => s += '<circle data-handle="' + m.id + ':' + i + '" cx="' + p[0] + '" cy="' + p[1] + '" r="' + 5 * k + '" fill="#fff" stroke="#155d76" stroke-width="2" vector-effect="non-scaling-stroke" style="cursor:move"/>');
+            s += label(c[0], Math.min(...m.corners.map(p => p[1])) - 6 * k, m.id, k);
+            if (m.id === active) m.corners.forEach((p, i) => s += '<circle data-handle="m:' + m.id + ':' + i + '" cx="' + p[0] + '" cy="' + p[1] + '" r="' + 5 * k + '" fill="#fff" stroke="#155d76" stroke-width="2" vector-effect="non-scaling-stroke" style="cursor:move"/>');
         }
-        if (adding) adding.forEach(p => s += '<circle cx="' + p[0] + '" cy="' + p[1] + '" r="' + 4 * k + '" fill="#c2e69e"/>');
+        for (const r of [...references, ...(pendingRef ? [pendingRef] : [])]) {
+            const on = r.id === active || r === pendingRef;
+            s += '<line data-ref="' + r.id + '" x1="' + r.a[0] + '" y1="' + r.a[1] + '" x2="' + r.b[0] + '" y2="' + r.b[1] + '" stroke="#6fb3e0" stroke-width="' + (on ? 3 : 2) + '" vector-effect="non-scaling-stroke"/>';
+            s += label((r.a[0] + r.b[0]) / 2, (r.a[1] + r.b[1]) / 2 - 6 * k, r === pendingRef ? 'A–B' : r.id + ' · ' + fmtLength(r.metres), k);
+            if (on) ['a', 'b'].forEach(end => s += '<circle data-handle="r:' + r.id + ':' + end + '" cx="' + r[end][0] + '" cy="' + r[end][1] + '" r="' + 5 * k + '" fill="#fff" stroke="#155d76" stroke-width="2" vector-effect="non-scaling-stroke" style="cursor:move"/>');
+        }
+        for (const p of adding || measuring || []) s += '<circle cx="' + p[0] + '" cy="' + p[1] + '" r="' + 4 * k + '" fill="#c2e69e"/>';
         v.draw(s);
     };
     v.redraw = draw;
     const list = () => {
-        document.getElementById('mlist').innerHTML = markers.length ? markers.map(m => {
+        const rows = markers.map(m => {
             const d = detected[m.id];
-            return '<div data-pick="' + m.id + '" aria-selected="' + (m.id === active) + '"><b>' + m.id + '</b> ' + (m.confirmed ? '<span class="flag good">confirmed</span>' : '<span class="flag">unconfirmed</span>') + (m.manual ? ' <span class="flag">placed by hand</span>' : '')
-                + '<br><span class="cap">' + (d ? d.frames.length + ' frames · ' + d.side_px_frame + ' px side in frame' : 'manual') + ' · ' + (markerScale(m) * 100).toFixed(2) + ' cm/px</span><br>' + flags(m.flags, ['blurry', 'small', 'few', 'obscured'])
+            return '<div data-pick="' + m.id + '" aria-selected="' + (m.id === active) + '"><b>' + m.id + '</b> marker ' + (m.confirmed ? '<span class="flag good">confirmed</span>' : '<span class="flag">unconfirmed</span>') + (m.manual ? ' <span class="flag">placed by hand</span>' : '')
+                + '<br><span class="cap">' + (d ? d.frames.length + ' frames · ' + d.side_px_frame + ' px side in frame' : 'manual') + ' · ' + (sideM / markerSide(m) * 100).toFixed(2) + ' cm/px</span><br>' + flags(m.flags, ['blurry', 'small', 'few', 'obscured'])
                 + '<div class="row" style="margin-top:6px"><button type="button" data-confirm="' + m.id + '">' + (m.confirmed ? 'Unconfirm' : 'Confirm corners') + '</button>' + (m.manual ? '<button type="button" data-remove="' + m.id + '">Remove</button>' : '') + '</div></div>';
-        }).join('') : '<div>No markers yet. Use “Add marker by hand” and click the four corners of a board.</div>';
-        const confirmed = markers.filter(m => m.confirmed).map(markerScale).sort((a, b) => a - b);
-        const median = confirmed.length ? confirmed[Math.floor(confirmed.length / 2)] : null;
-        const spread = confirmed.length > 1 ? Math.sqrt(confirmed.reduce((s, v) => s + (v - median) ** 2, 0) / confirmed.length) / median : null;
-        document.getElementById('mscale').innerHTML = '<h3>Scale</h3>' + (median ? '<p>' + (median * 100).toFixed(3) + ' cm per preview pixel, from ' + confirmed.length + ' confirmed marker' + (confirmed.length > 1 ? 's' : '') + '.</p>' + (spread == null ? '<div class="note warn">One marker: scale is only reliable near it.</div>' : '<p>Markers disagree by ' + (spread * 100).toFixed(1) + '%.' + (spread > .1 ? '</p><div class="note warn">Over 10%: check for tilt, relief or misaligned frames.</div>' : '</p>')) : '<p>No confirmed markers. Map geometry waits until at least one is confirmed.</p>');
-        document.getElementById('mstatus').textContent = adding ? 'Click corner ' + (adding.length + 1) + ' of 4 on the preview.' : dirty ? 'Unsaved changes. Saving reruns Map geometry only.' : '';
+        }).concat(references.map(r => '<div data-pick="' + r.id + '" aria-selected="' + (r.id === active) + '"><b>' + r.id + '</b> measured distance <span class="flag good">' + esc(fmtLength(r.metres)) + '</span>' + (r.label ? '<br>' + esc(r.label) : '')
+            + '<br><span class="cap">' + refLength(r).toFixed(1) + ' px · ' + (r.metres / refLength(r) * 100).toFixed(2) + ' cm/px</span><div class="row" style="margin-top:6px"><button type="button" data-remove="' + r.id + '">Remove</button></div></div>'));
+        document.getElementById('mlist').innerHTML = rows.join('') || '<div>No scale references yet. Measure a known distance, or add a marker by hand.</div>';
+        const all = estimates().sort((a, b) => a - b);
+        const median = all.length ? (all[Math.floor((all.length - 1) / 2)] + all[Math.ceil((all.length - 1) / 2)]) / 2 : null;   // same as the worker's numpy median
+        const spread = all.length > 1 ? Math.sqrt(all.reduce((s, x) => s + (x - median) ** 2, 0) / all.length) / median : null;
+        document.getElementById('mscale').innerHTML = '<h3>Scale</h3>' + (median ? '<p>' + (median * 100).toFixed(3) + ' cm per preview pixel, from ' + all.length + ' confirmed reference' + (all.length > 1 ? 's' : '') + '.</p>' + (spread == null ? '<div class="note warn">One reference: scale is only reliable near it. Add another across the site to check it.</div>' : '<p>References disagree by ' + (spread * 100).toFixed(1) + '%.' + (spread > .1 ? '</p><div class="note warn">Over 10%: check for a mis-clicked point, camera tilt, relief or misaligned frames.</div>' : '</p>')) : '<p>Nothing confirmed yet. Map geometry waits for at least one scale reference.</p>');
+        document.getElementById('mstatus').textContent = adding ? 'Click corner ' + (adding.length + 1) + ' of 4 on the preview.' : measuring ? 'Click point ' + (measuring.length ? 'B' : 'A') + ' on the preview.' : pendingRef ? 'Enter the measured distance.' : dirty ? 'Unsaved changes. Saving reruns Map geometry only.' : '';
         draw();
     };
-    const focus = id => { const m = markers.find(x => x.id === id); if (!m) return; const xs = m.corners.map(p => p[0]), ys = m.corners.map(p => p[1]); v.focus(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys), 6); };
-    v.onDrag = (handle, p) => { const [id, i] = handle.split(':'); const m = markers.find(x => x.id === id); m.corners[+i] = p; m.confirmed = true; dirty = true; draw(); };
+    const focus = id => {
+        const m = markers.find(x => x.id === id), r = references.find(x => x.id === id);
+        const p = m ? m.corners : r ? [r.a, r.b] : null; if (!p) return;
+        const xs = p.map(q => q[0]), ys = p.map(q => q[1]); v.focus(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys), m ? 6 : 1.6);
+    };
+    v.onDrag = (handle, p) => {
+        const [type, id, i] = handle.split(':');
+        if (type === 'm') { const m = markers.find(x => x.id === id); m.corners[+i] = p; m.confirmed = true; }
+        else { const r = references.find(x => x.id === id); if (r) r[i] = p; }
+        dirty = true; draw();
+    };
     v.onDragEnd = () => list();
+    const nextId = prefix => { let n = 1; while (markers.some(m => m.id === prefix + n) || references.some(r => r.id === prefix + n)) n++; return prefix + n; };
     v.onClick = (p, target) => {
         if (adding) {
             adding.push(p);
             if (adding.length === 4) {
-                let n = 1; while (markers.some(m => m.id === 'H' + n)) n++;
                 const c = adding.reduce((a, q) => [a[0] + q[0] / 4, a[1] + q[1] / 4], [0, 0]);
                 const corners = [...adding].sort((a, b) => Math.atan2(a[1] - c[1], a[0] - c[0]) - Math.atan2(b[1] - c[1], b[0] - c[0]));
-                markers.push({id: 'H' + n, corners, confirmed: true, manual: true, flags: []});
-                active = 'H' + n; adding = null; dirty = true;
+                active = nextId('H'); markers.push({id: active, corners, confirmed: true, manual: true, flags: []});
+                adding = null; dirty = true;
             }
             list(); return;
         }
-        const hit = target.closest?.('[data-marker]');
-        if (hit) { active = hit.dataset.marker; list(); }
+        if (measuring) {
+            measuring.push(p);
+            if (measuring.length === 2) {
+                pendingRef = {id: 'pending', a: measuring[0], b: measuring[1]}; measuring = null;
+                document.getElementById('refForm').hidden = false; document.getElementById('refValue').focus();
+            }
+            list(); return;
+        }
+        const hit = target.closest?.('[data-marker],[data-ref]');
+        if (hit) { active = hit.dataset.marker || hit.dataset.ref; list(); }
     };
     body.querySelector('.list').onclick = e => {
         const c = e.target.closest('[data-confirm]'), r = e.target.closest('[data-remove]'), p = e.target.closest('[data-pick]');
         if (c) { const m = markers.find(x => x.id === c.dataset.confirm); m.confirmed = !m.confirmed; dirty = true; }
-        else if (r) { markers.splice(markers.findIndex(x => x.id === r.dataset.remove), 1); dirty = true; }
+        else if (r) { const id = r.dataset.remove; const mi = markers.findIndex(x => x.id === id); if (mi >= 0) markers.splice(mi, 1); else references.splice(references.findIndex(x => x.id === id), 1); dirty = true; }
         else if (p) { active = p.dataset.pick; focus(active); }
         list();
     };
-    document.getElementById('addMarker').onclick = () => { adding = []; list(); };
+    const setSide = () => { const value = Number(sideInput.value) * UNITS[sideUnit.value]; if (value >= 0.05 && value <= 50) { sideM = value; dirty = true; list(); } else document.getElementById('mstatus').textContent = 'Marker size must be between 5 cm and 50 m.'; };
+    sideInput.onchange = setSide; sideUnit.onchange = setSide;
+    document.getElementById('addMarker').onclick = () => { adding = []; measuring = null; list(); };
+    document.getElementById('measure').onclick = () => { measuring = []; adding = null; pendingRef = null; document.getElementById('refForm').hidden = true; list(); };
+    document.getElementById('refCancel').onclick = () => { pendingRef = null; document.getElementById('refForm').hidden = true; list(); };
+    document.getElementById('refAdd').onclick = () => {
+        const metres = Number(document.getElementById('refValue').value) * UNITS[document.getElementById('refUnit').value];
+        if (!(metres > 0) || !pendingRef) { document.getElementById('mstatus').textContent = 'Enter the measured distance.'; return; }
+        active = nextId('D');
+        references.push({id: active, a: pendingRef.a, b: pendingRef.b, metres, label: document.getElementById('refLabel').value.trim(), confirmed: true});
+        pendingRef = null; dirty = true;
+        document.getElementById('refForm').hidden = true; document.getElementById('refValue').value = ''; document.getElementById('refLabel').value = '';
+        list();
+    };
     document.getElementById('saveMarkers').onclick = async () => {
         const note = text => { const el = document.getElementById('mstatus'); if (el) el.textContent = text; };
-        try { await api('/api/intake/jobs/' + job.id + '/calibration', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({markers})}); dirty = false; note('Saved. Map geometry is being rebuilt.'); }
+        try { await api('/api/intake/jobs/' + job.id + '/calibration', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({markers, references, markerSideM: sideM})}); dirty = false; note('Saved. Map geometry is being rebuilt.'); }
         catch (e) { note(e.message); }
     };
     list();
@@ -388,7 +471,7 @@ function viewGeometry(body, data) {
         return;
     }
     const sc = data.scale;
-    body.innerHTML = '<table class="kv"><tr><td>Scale</td><td>' + (sc.m_per_px * 100).toFixed(3) + ' cm per preview pixel, median of ' + sc.markers + ' confirmed marker(s)' + (sc.spread != null ? '; markers disagree by ' + (sc.spread * 100).toFixed(1) + '%' : '') + '</td></tr><tr><td>Extent</td><td>' + data.extent_m.map(v => v.toFixed(1)).join(' × ') + ' m (local)</td></tr><tr><td>Features</td><td>' + data.features.length + ' proposals: ' + ['area', 'line', 'point'].map(g => data.features.filter(f => f.geometry === g).length + ' ' + g + 's').join(', ') + '</td></tr></table><div id="geomap" style="margin-top:10px"></div>';
+    body.innerHTML = '<table class="kv"><tr><td>Scale</td><td>' + (sc.m_per_px * 100).toFixed(3) + ' cm per preview pixel, median of ' + sc.markers + ' marker(s) and ' + (sc.references || 0) + ' measured distance(s)' + (sc.spread != null ? '; references disagree by ' + (sc.spread * 100).toFixed(1) + '%' : '') + '</td></tr><tr><td>Extent</td><td>' + data.extent_m.map(v => v.toFixed(1)).join(' × ') + ' m (local)</td></tr><tr><td>Features</td><td>' + data.features.length + ' proposals: ' + ['area', 'line', 'point'].map(g => data.features.filter(f => f.geometry === g).length + ' ' + g + 's').join(', ') + '</td></tr></table><div id="geomap" style="margin-top:10px"></div>';
     const features = S.reviewedFeatures(data, {}, labels);
     viewer = mapView(document.getElementById('geomap'), data, () => features);
 }

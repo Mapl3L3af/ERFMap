@@ -14,7 +14,7 @@ button,.button{cursor:pointer;text-decoration:none;display:inline-block}
 button:hover:not(:disabled),.button:hover{filter:brightness(1.25)}
 button:disabled{opacity:.45;cursor:default}
 button.primary,.button.primary{background:#c2e69e;color:#14200b;border-color:#c2e69e;font-weight:600}
-header .button{background:#323232;color:#ddd}
+header .button{background:#323232;color:#ddd;white-space:nowrap;flex-shrink:0}
 main{padding:22px 3vw 40px;max-width:1800px;margin:auto}
 small.cap,.cap{font:600 11px/1.5 ui-monospace,monospace;letter-spacing:1px;color:var(--dim);text-transform:uppercase}
 h2{font-size:20px;margin:0 0 4px}h3{font-size:14px;margin:18px 0 8px}
@@ -73,4 +73,5 @@ td input,td select{padding:3px 6px;width:100%}
 .export{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}
 details summary{cursor:pointer;color:var(--dim)}
 pre{white-space:pre-wrap;font-size:12px;background:#111;padding:8px;border-radius:6px;max-height:240px;overflow:auto}
-@media(max-width:1000px){.home,.layout,.split,.export,.compare{grid-template-columns:minmax(0,1fr)}.title h1{max-width:52vw}.unref{display:none}}
+@media(max-width:1000px){.home,.layout,.split,.export,.compare{grid-template-columns:minmax(0,1fr)}.title h1{max-width:52vw}header{gap:10px}.title{min-width:0;flex-shrink:1}.unref{display:none}}
+@media(max-width:480px){.title h1{max-width:38vw}}

@@ -12,6 +12,8 @@ const shared = require('../erfmap-intake/shared');
 const STAGES = shared.STAGES;
 const WORKER = path.join(__dirname, '..', 'worker', 'erfmap_worker.py');
 const VIDEO = /\.(mp4|mov|m4v|avi|mkv|webm|mts|m2ts|3gp)$/i;
+const PHOTO = /\.(jpe?g|png|tiff?|webp|bmp)$/i;
+const MAX_PHOTOS = 200;
 const MAX_UPLOAD = 8 * 1024 ** 3;
 const failure = (status, message) => Object.assign(Error(message), {status});
 
@@ -94,7 +96,7 @@ function createIntake({directory, createProject, readBody}) {
         return ['complete', 'needs_review'].includes(state.status) || (stage.optional && state.status === 'unavailable');
     }
     function advance(job) {
-        if (children.has(job.id)) return;
+        if (children.has(job.id) || job.started === false) return;
         for (const stage of STAGES) {
             const state = job.stages[stage.id];
             if (stage.id === 'review') {
@@ -166,7 +168,8 @@ function createIntake({directory, createProject, readBody}) {
             // Seed calibration with the detected candidates, unconfirmed. Keep any
             // markers the reviewer added by hand.
             const manual = (job.calibration?.markers || []).filter(m => m.manual);
-            job.calibration = {markers: [...(outcome.markers || []).map(m => ({id: m.id, corners: m.corners, confirmed: false, flags: m.flags, frames: m.frames.length})), ...manual]};
+            job.calibration = {markerSideM: job.calibration?.markerSideM || 0.3048, references: [],
+                markers: [...(outcome.markers || []).map(m => ({id: m.id, corners: m.corners, confirmed: false, flags: m.flags, frames: m.frames.length})), ...manual]};
         }
         save(job);
         advance(job);
@@ -186,30 +189,50 @@ function createIntake({directory, createProject, readBody}) {
     }
 
     // ------------------------------------------------------------ routes
+    const cleanName = raw => path.basename(String(raw || '')).replace(/[^\w.\- ]+/g, '_').slice(0, 120);
+    async function receive(req, target, limit) {
+        let size = 0;
+        await new Promise((resolve, reject) => {
+            const out = fs.createWriteStream(target);
+            req.on('data', chunk => { size += chunk.length; if (size > limit) { req.destroy(); reject(failure(413, 'That file is too large.')); } });
+            req.on('error', reject);
+            out.on('error', reject);
+            out.on('finish', resolve);
+            req.pipe(out);
+        });
+        if (!size) throw failure(400, 'The upload was empty.');
+        return size;
+    }
+    // One video, or one or more photos. Photo jobs are created with the first
+    // photo and ?defer=1, the rest are added to /originals, then /start runs them.
     async function upload(req, url) {
-        const name = path.basename(String(url.searchParams.get('name') || 'video.mp4')).replace(/[^\w.\- ]+/g, '_').slice(0, 120);
-        if (!VIDEO.test(name)) throw failure(415, 'Choose a video file (MP4, MOV, MKV, AVI or WebM).');
+        const name = cleanName(url.searchParams.get('name') || 'video.mp4');
+        const media = PHOTO.test(name) ? 'photos' : VIDEO.test(name) ? 'video' : null;
+        if (!media) throw failure(415, 'Choose a video (MP4, MOV, MKV, AVI, WebM) or photos (JPEG, PNG, TIFF, WebP).');
         const id = randomUUID().replace(/-/g, '').slice(0, 12);
         fs.mkdirSync(path.join(dir(id), 'original'), {recursive: true});
         const target = path.join(dir(id), 'original', name);
-        let size = 0;
-        try {
-            await new Promise((resolve, reject) => {
-                const out = fs.createWriteStream(target);
-                req.on('data', chunk => { size += chunk.length; if (size > MAX_UPLOAD) { req.destroy(); reject(failure(413, 'Videos over 8 GB are not supported.')); } });
-                req.on('error', reject);
-                out.on('error', reject);
-                out.on('finish', resolve);
-                req.pipe(out);
-            });
-        } catch (e) { fs.rmSync(dir(id), {recursive: true, force: true}); throw e; }
-        if (!size) { fs.rmSync(dir(id), {recursive: true, force: true}); throw failure(400, 'The upload was empty.'); }
-        const job = {id, name, createdAt: new Date().toISOString(), original: {name, path: 'original/' + name, size, type: req.headers['content-type'] || null},
-            stages: Object.fromEntries(STAGES.map(s => [s.id, {status: 'queued', progress: 0, attempts: 0}])), calibration: {markers: []}, review: {features: {}}, imports: []};
+        let size;
+        try { size = await receive(req, target, MAX_UPLOAD); }
+        catch (e) { fs.rmSync(dir(id), {recursive: true, force: true}); throw e; }
+        const original = {name, path: 'original/' + name, size, type: req.headers['content-type'] || null};
+        const job = {id, name, media, createdAt: new Date().toISOString(), original, originals: [original], started: media === 'video' || url.searchParams.get('defer') !== '1',
+            stages: Object.fromEntries(STAGES.map(s => [s.id, {status: 'queued', progress: 0, attempts: 0}])), calibration: {markers: [], references: [], markerSideM: 0.3048}, review: {features: {}}, imports: []};
         write(path.join(dir(id), 'labels.json'), labels());
         jobs.set(id, job);
         save(job);
-        advance(job);
+        if (job.started) advance(job);
+        return publicJob(job);
+    }
+    async function addPhoto(job, req, url) {
+        if (job.media !== 'photos' || job.started) throw failure(409, 'Photos can only be added to a photo job before it starts.');
+        if (job.originals.length >= MAX_PHOTOS) throw failure(413, 'Use at most ' + MAX_PHOTOS + ' photos.');
+        let name = cleanName(url.searchParams.get('name'));
+        if (!PHOTO.test(name)) throw failure(415, 'Only photos can be added to a photo job.');
+        while (job.originals.some(o => o.name === name)) name = name.replace(/(\.[^.]+)$/, '_1$1');
+        const size = await receive(req, path.join(dir(job.id), 'original', name), MAX_UPLOAD);
+        job.originals.push({name, path: 'original/' + name, size, type: req.headers['content-type'] || null});
+        save(job);
         return publicJob(job);
     }
 
@@ -266,19 +289,36 @@ function createIntake({directory, createProject, readBody}) {
             save(job); advance(job);
             return json(publicJob(job)), true;
         }
+        if (action === 'originals' && req.method === 'POST') return json(await addPhoto(job, req, url), 201), true;
+        if (action === 'start' && req.method === 'POST') {
+            if (!job.started) {
+                job.started = true;
+                if (job.media === 'photos') job.name = job.originals.length === 1 ? job.original.name : job.originals.length + ' photos (' + job.original.name + ', …)';
+                save(job); advance(job);
+            }
+            return json(publicJob(job)), true;
+        }
         if (action === 'files' && req.method === 'GET') return serveFile(res, job, parts.slice(3).join('/')), true;
         if (action === 'calibration' && req.method === 'POST') {
             const input = await readBody(req);
             if (!Array.isArray(input.markers)) throw failure(400, 'Send a markers list.');
+            const references = Array.isArray(input.references) ? input.references : [];
+            const point = q => Array.isArray(q) && q.length === 2 && q.every(Number.isFinite);
+            if (!references.every(r => typeof r.id === 'string' && point(r.a) && point(r.b) && Number.isFinite(r.metres) && r.metres > 0 && r.metres < 10000 && Math.hypot(r.a[0] - r.b[0], r.a[1] - r.b[1]) > 2))
+                throw failure(400, 'Each measured distance needs two different points and a length in metres.');
+            const side = input.markerSideM ?? 0.3048;
+            if (!(Number.isFinite(side) && side >= 0.05 && side <= 50)) throw failure(400, 'Marker size must be between 5 cm and 50 m.');
             const valid = input.markers.every(m => typeof m.id === 'string' && Array.isArray(m.corners) && m.corners.length === 4 && m.corners.every(c => Array.isArray(c) && c.length === 2 && c.every(Number.isFinite)));
             if (!valid) throw failure(400, 'Each marker needs an ID and four corner points.');
             if (job.stages.geometry.status === 'processing') throw failure(409, 'Map geometry is being built. Try again in a moment.');
-            job.calibration = {markers: input.markers.map(m => ({id: m.id.slice(0, 20), corners: m.corners, confirmed: m.confirmed === true, manual: m.manual === true, flags: Array.isArray(m.flags) ? m.flags.map(String) : [], frames: m.frames}))};
-            const confirmed = job.calibration.markers.filter(m => m.confirmed).length;
+            job.calibration = {markerSideM: side,
+                markers: input.markers.map(m => ({id: m.id.slice(0, 20), corners: m.corners, confirmed: m.confirmed === true, manual: m.manual === true, flags: Array.isArray(m.flags) ? m.flags.map(String) : [], frames: m.frames})),
+                references: references.map(r => ({id: r.id.slice(0, 20), a: r.a, b: r.b, metres: r.metres, label: String(r.label || '').slice(0, 80), confirmed: r.confirmed !== false}))};
+            const confirmed = job.calibration.markers.filter(m => m.confirmed).length + job.calibration.references.filter(r => r.confirmed).length;
             if (passable(STAGES.find(s => s.id === 'markers'), job.stages.markers)) {
                 Object.assign(job.stages.markers, confirmed
-                    ? {status: 'complete', summary: confirmed + ' marker(s) confirmed by reviewer, ' + job.calibration.markers.length + ' in total'}
-                    : {status: 'needs_review', summary: 'No markers confirmed. Confirm at least one to scale the map.'});
+                    ? {status: 'complete', summary: confirmed + ' scale reference(s) confirmed: ' + job.calibration.markers.filter(m => m.confirmed).length + ' marker(s), ' + job.calibration.references.length + ' measured distance(s)'}
+                    : {status: 'needs_review', summary: 'Nothing confirmed. Confirm a marker or add a measured distance to scale the map.'});
             }
             if (passable(STAGES.find(s => s.id === 'merging'), job.stages.merging)) reset(job, 'geometry');
             save(job); advance(job);

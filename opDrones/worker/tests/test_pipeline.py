@@ -59,5 +59,51 @@ class PipelineTest(unittest.TestCase):
         self.assertTrue(geometry['features'])
 
 
+class PhotoPipelineTest(unittest.TestCase):
+    """A handful of stills in shuffled order, scaled by one measured distance."""
+    @classmethod
+    def setUpClass(cls):
+        cls.job = Path(tempfile.mkdtemp())
+        (cls.job / 'original').mkdir()
+        video = cls.job / 'flyover.mp4'
+        synthetic.main(str(video))
+        originals = []
+        for t in (4.5, 1, 2.9, 3.5, 2.2):          # out of order, ~75% overlap; t=2.9 falls in the blurred stretch
+            name = 'IMG_%s.jpg' % str(t).replace('.', '_')
+            subprocess.run(['ffmpeg', '-v', 'error', '-y', '-ss', str(t), '-i', str(video), '-frames:v', '1', '-q:v', '2',
+                            str(cls.job / 'original' / name)], check=True)
+            originals.append({'name': name, 'path': 'original/' + name})
+        (cls.job / 'job.json').write_text(json.dumps({'media': 'photos', 'original': originals[0], 'originals': originals}))
+        labels = [{'kind': 'grass', 'geometry': 'area'}, {'kind': 'unknown', 'geometry': 'area'}]
+        (cls.job / 'labels.json').write_text(json.dumps({'labels': labels, 'map': {}}))
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.job, ignore_errors=True)
+
+    run_stage = PipelineTest.run_stage
+
+    def test_photos(self):
+        self.assertEqual(self.run_stage('probe')['status'], 'complete')
+        self.run_stage('frames')
+        frames = json.loads((self.job / 'stages/frames/result.json').read_text())['frames']
+        self.assertEqual(len(frames), 5)
+        self.assertEqual(sum(f['usable'] for f in frames), 4, 'only the blurred still should be dropped')
+        self.assertEqual(self.run_stage('correction')['status'], 'complete')
+        correction = json.loads((self.job / 'stages/correction/result.json').read_text())
+        self.assertIn('4 of them aligned', correction['summary'])
+        for stage in ('markers', 'regions', 'classification', 'merging'):
+            self.run_stage(stage)
+        # A 10 m tape along the preview's x axis. Ground truth is 120 px/m, frames are scaled 0.8, then the mosaic scale.
+        px_per_m = 120 * 0.8 * correction['mosaic']['scale']
+        ref = {'id': 'D1', 'a': [100, 200], 'b': [100 + 10 * px_per_m, 200], 'metres': 10, 'confirmed': True}
+        (self.job / 'calibration.json').write_text(json.dumps({'markers': [], 'references': [ref], 'markerSideM': 0.3048}))
+        self.run_stage('geometry')
+        geometry = json.loads((self.job / 'stages/geometry/result.json').read_text())
+        self.assertAlmostEqual(geometry['scale']['m_per_px'] * px_per_m, 1, places=6)
+        self.assertEqual(geometry['scale']['references'], 1)
+        self.assertTrue(geometry['features'])
+
+
 if __name__ == '__main__':
     unittest.main()
