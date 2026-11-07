@@ -49,13 +49,27 @@ Both adapters are shell commands. They receive JSON on stdin and must print JSON
 
 Labels are mapped to erfMap kinds through `intake/label-map.json`. A label that already matches a kind needs no entry. Unmapped labels become unknown and are flagged for review. To extend the label set, add kinds to `erfmap-survey/model.js` (the UI reads them from there) and map new model labels in `label-map.json`.
 
-### Free labelling: CLIP zones, then points
+### Free labelling: a council of models, zones then points
 
 ```
-pip install open_clip_torch pillow
+pip install open_clip_torch pillow      # CLIP: zones, lamp posts, benches
+pip install transformers                # SegFormer: a per-pixel scene model (zones, benches, street lights)
+pip install deepforest                  # DeepForest: tree crowns, trained on aerial and drone imagery
 ```
 
-Then restart the server. Region detection and classification pick it up by themselves. It labels in two stages (`adapters/clip_zones.py`), and the result keeps both layers:
+Install any of them; the ones that are missing sit out (the run's model note lists who voted). Restart the server and region detection and classification pick it up by themselves. All are free and run on your own computer; each downloads its weights from Hugging Face on first use (CLIP about 600 MB, SegFormer b2 about 100 MB, DeepForest about 130 MB).
+
+How the council votes (`adapters/clip_zones.py`):
+- **Zones:** CLIP and SegFormer each give every pixel a probability for building, path, road, grass and tree. They are averaged with `WEIGHTS`. SegFormer's own labels are mapped by name (`SYNONYMS`); where it sees something we don't map (sky, water) it does not vote there. DeepForest crowns pull their pixels towards tree (`TREE_WEIGHT`).
+- **Trees:** with DeepForest installed, each detected crown (score at least `TREE_MIN`) becomes a tree point. Without it, crowns are found in the combined tree scores.
+- **Lamp posts and benches:** one member must be at least 0.6 sure; the confidence is the average of every member's score at that spot, so a lone vote ends up in review.
+- Each zone and point keeps every member's score (`votes`). Where members differ by more than 30 points the feature is flagged "models disagree" in Review.
+
+Swap or leave out members with `ERFMAP_CLIP=off`, `ERFMAP_SEGFORMER=off`, `ERFMAP_DEEPFOREST=off`, `ERFMAP_SEGFORMER_MODEL` (any Hugging Face semantic segmentation model, for example one trained on aerial imagery; its label names are matched through `SYNONYMS`), `ERFMAP_DEEPFOREST_MODEL`, `ERFMAP_CLIP_MODEL` and `ERFMAP_CLIP_PRETRAINED`.
+
+None of these models was trained on this kind of site: SegFormer's default (ADE20K) is ground-level scenes and CLIP is web photos. DeepForest expects about 10 cm per pixel, so it suits drone photos better than satellite images. On satellite images (30 to 50 cm per pixel) benches and lamp posts are a few pixels and will mostly be missed.
+
+Zones and points are then built in two stages:
 
 1. **Zones (polygons), in priority order.** A grid of overlapping windows is scored by CLIP as building, path, road, grass or tree, and the scores are spread over colour segments so zone edges follow visible edges.
    - Buildings are reserved first, each traced as its own footprint.

@@ -133,5 +133,47 @@ class ZonesTest(unittest.TestCase):
             self.assertGreater(y, 40, 'crown centres sit inside the trees, not on the photo border')
 
 
+
+class CouncilTest(unittest.TestCase):
+    def test_label_names_map_onto_our_classes(self):
+        ids = cz.map_labels({0: 'wall', 1: 'building, edifice', 2: 'sidewalk, pavement', 3: 'grass', 4: 'tree', 5: 'sky', 6: 'road, route', 7: 'impervious surfaces'}, cz.SYNONYMS)
+        self.assertEqual(ids, {'building': [1], 'road': [6, 7], 'path': [2], 'grass': [3], 'tree': [4]})
+        self.assertEqual(cz.map_labels({9: 'bench', 10: 'streetlight, street lamp'}, cz.POINT_SYNONYMS), {'light': [10], 'bench': [9]})
+
+    def test_votes_are_weighted_and_silent_members_do_not_count(self):
+        a = np.zeros((1, 2, 5), np.float32); a[..., cz.CLASSES.index('grass')] = 1
+        b = np.zeros((1, 2, 5), np.float32); b[..., cz.CLASSES.index('road')] = 1
+        out = cz.combine({'clip': (a, np.ones((1, 2))), 'segformer': (b, np.array([[1.0, 0.0]]))}, (1, 2))
+        self.assertAlmostEqual(out[0, 0, cz.CLASSES.index('grass')], 0.5)        # both voted: an even split
+        self.assertAlmostEqual(out[0, 1, cz.CLASSES.index('grass')], 1.0)        # SegFormer saw sky here: CLIP decides
+
+    def test_detected_crowns_become_tree_points_and_pull_towards_tree(self):
+        image, probs = scene()
+        crowns = [(500.0, 200.0, 0.9, 30.0), (150.0, 300.0, 0.7, 40.0)]
+        pulled = cz.add_tree_crowns(probs, crowns)
+        self.assertGreater(pulled[200, 500, cz.CLASSES.index('tree')], probs[200, 500, cz.CLASSES.index('tree')] + 0.4)
+        trees = [r for r in cz.build_zones(image, pulled, SIZE, trees=crowns) if r['label'] == 'tree']
+        self.assertEqual([t['point'] for t in trees], [[1000.0, 400.0], [300.0, 600.0]])
+        self.assertEqual([t['confidence'] for t in trees], [0.9, 0.7])
+
+    def test_points_need_one_sure_member_and_report_every_vote(self):
+        from PIL import Image
+
+        class Fake:
+            def __init__(self, name, spots):
+                self.name, self.spots = name, spots
+
+            def points(self, image):
+                maps = {k: np.zeros((100, 200), np.float32) for k in cz.POINTS}
+                for kind, x, y, p in self.spots:
+                    maps[kind][y - 2:y + 3, x - 2:x + 3] = p
+                return maps
+
+        members = [Fake('clip', [('bench', 50, 50, 0.8), ('light', 150, 50, 0.4)]), Fake('segformer', [('bench', 51, 50, 0.6), ('light', 150, 50, 0.3)])]
+        found = cz.council_points(Image.new('RGB', (200, 100)), members, 1.0)
+        self.assertEqual([(k, round(c, 2)) for c, k, *_ in found], [('bench', 0.7)])    # the lamp post was nobody's confident call
+        self.assertEqual(found[0][4], {'clip': 0.8, 'segformer': 0.6})
+
+
 if __name__ == '__main__':
     unittest.main()

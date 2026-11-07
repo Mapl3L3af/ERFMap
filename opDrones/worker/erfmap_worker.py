@@ -145,7 +145,7 @@ def classifier_command():
 
 
 def zones_command():
-    """ERFMAP_SEGMENTER if set, else the bundled CLIP zones + objects pass when open_clip is installed (ERFMAP_ZONES=off disables it)."""
+    """ERFMAP_SEGMENTER if set, else the bundled model council (CLIP, SegFormer, DeepForest: whichever are installed). ERFMAP_ZONES=off disables it."""
     configured = os.environ.get('ERFMAP_SEGMENTER', '').strip()
     if configured:
         return configured
@@ -154,7 +154,7 @@ def zones_command():
     if os.environ.get('ERFMAP_CLASSIFIER', '').strip().lower() in ('off', 'none', '0'):
         return None
     import importlib.util
-    if importlib.util.find_spec('open_clip') and importlib.util.find_spec('torch'):
+    if importlib.util.find_spec('torch') and (importlib.util.find_spec('open_clip') or importlib.util.find_spec('transformers')):
         script = Path(__file__).resolve().parent / 'adapters' / 'clip_zones.py'
         return subprocess.list2cmdline([sys.executable, str(script)]) if os.name == 'nt' else '"%s" "%s"' % (sys.executable, script)
     return None
@@ -894,17 +894,17 @@ def stage_regions(job):
     frames = keyframes(job)
     segmenter = zones_command()
     builtin = bool(segmenter) and 'clip_zones.py' in segmenter and not os.environ.get('ERFMAP_SEGMENTER')
-    method = ('CLIP in two stages: zone polygons in priority order (buildings, then paths and roads, then grass as the fallback), then points for trees, lamp posts and benches' if builtin
+    method = ('Model council (CLIP, SegFormer and DeepForest, whichever are installed) in two stages: zone polygons in priority order (buildings, then paths and roads, then grass as the fallback), then points for trees, lamp posts and benches' if builtin
               else 'external segmenter: ' + segmenter if segmenter else 'baseline colour clustering (OpenCV k-means). Not SAM 2.')
     regions, model = [], None
     if segmenter:
-        progress(.1, 'Mapping zones and points with CLIP (a few seconds per photo)' if builtin else 'Running external segmenter')
+        progress(.1, 'Mapping zones and points with the model council (up to a minute per photo)' if builtin else 'Running external segmenter')
         reply = external(segmenter, {'job': str(Path(job).resolve()), 'frames': [{'id': f['id'], 'image': str((Path(job) / f['after']).resolve())} for f in frames]}, 'Segmenter')
         model = reply.get('model')
         for r in reply.get('regions', []):
             if r.get('frame') in {f['id'] for f in frames} and len(r.get('polygon', [])) >= 3:
                 region = {'frame': r['frame'], 'polygon': r['polygon'], 'area_px': polygon_area(r['polygon']), 'mean_rgb': r.get('mean_rgb'), 'score': r.get('score')}
-                for key in ('label', 'model_label', 'confidence', 'role', 'point'):
+                for key in ('label', 'model_label', 'confidence', 'role', 'point', 'votes'):
                     if r.get(key) is not None:
                         region[key] = r[key]
                 regions.append(region)
@@ -961,8 +961,11 @@ def stage_classification(job):
             conf = r.get('confidence')
             conf = float(conf) if isinstance(conf, (int, float)) else None
             kind = kind if kind in kinds else None
+            votes = r.get('votes') or {}
+            split = len(votes) > 1 and max(votes.values()) - min(votes.values()) > 0.3     # council members disagree
             predictions.append({'id': r['id'], 'kind': kind, 'model_label': r.get('model_label') or r['label'], 'confidence': conf, 'role': r.get('role'),
-                                'needs_review': kind is None or conf is None or conf < UNCERTAIN_BELOW})
+                                'votes': votes or None, 'disagreement': split,
+                                'needs_review': kind is None or conf is None or conf < UNCERTAIN_BELOW or split})
         uncertain = sum(p['needs_review'] for p in predictions)
         points = sum(1 for p in predictions if p.get('role') in ('point', 'object'))
         return {'status': 'needs_review' if uncertain else 'complete',
@@ -1147,6 +1150,9 @@ def stage_merging(job):
         flags = []
         if len(kinds) > 1:
             flags.append('conflicting labels: ' + ', '.join(kinds))
+        split = [m['pred']['votes'] for m in c['members'] if m['pred'].get('disagreement')]
+        if split:
+            flags.append('models disagree: ' + ', '.join('%s %.0f%%' % (k, v * 100) for k, v in split[0].items()))
         if c['ious'] and np.mean(c['ious']) < 0.5:
             flags.append('geometry varies between frames')
         if len(c['members']) == 1:

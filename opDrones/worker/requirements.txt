@@ -5,3 +5,6 @@ opencv-python-headless>=4.8
 pillow>=10
 # Optional: free zero-shot classifier (CLIP). Large download (PyTorch).
 # open_clip_torch>=2.24
+# Optional council members (any subset works; see worker/README.md):
+# transformers>=4.40     SegFormer per-pixel scene model
+# deepforest>=1.4        tree crowns from aerial and drone imagery

@@ -126,10 +126,13 @@ def polygons(mask, scale, size, tol):
     return out
 
 
-def build_zones(image, probs, size):
+def build_zones(image, probs, size, trees=None, votes=None):
     """Zones and tree points from per-pixel class probabilities.
 
-    image: work-size BGR image. probs: HxWxC in CLASSES order. size: (w, h) of the original photo.
+    image: work-size BGR image. probs: HxWxC in CLASSES order (the council's combined vote).
+    size: (w, h) of the original photo. trees: optional [(x, y, confidence, radius)] in work pixels
+    from a tree detector, used instead of finding crowns in probs. votes: optional
+    {member: HxWxC probs}, reported per zone so a reviewer can see who agreed.
     Returns regions in original-photo pixels."""
     h, w = image.shape[:2]
     scale = w / size[0]
@@ -176,10 +179,19 @@ def build_zones(image, probs, size):
             piece = comp == c
             if label == 'grass' and piece.sum() < 0.0005 * h * w:
                 continue
-            conf = float(probs[:, :, CLASSES.index(label)][piece].mean())
+            k_label = CLASSES.index(label)
+            conf = float(probs[:, :, k_label][piece].mean())
+            said = {m: round(float(v[:, :, k_label][piece].mean()), 3) for m, v in (votes or {}).items()}
             for p in polygons(piece, scale, size, tol):
-                regions.append({'polygon': p['polygon'], 'label': ZONE_KIND[label], 'model_label': label, 'role': 'zone', 'confidence': round(conf, 3)})
+                region = {'polygon': p['polygon'], 'label': ZONE_KIND[label], 'model_label': label, 'role': 'zone', 'confidence': round(conf, 3)}
+                if said:
+                    region['votes'] = said
+                regions.append(region)
 
+    if trees is not None:                 # a tree detector found the crowns
+        for x, y, conf, r in trees:
+            regions.append(point_region(x / scale, y / scale, 'tree', conf, 2 * r / scale))
+        return regions
     # Trees: one point per crown, wherever trees dominate (usually over grass).
     tree = (tr >= PRIORITY * best)[seg] & ~building & ~path & ~road
     tree = cv2.morphologyEx(tree.astype(np.uint8), cv2.MORPH_OPEN, small)
@@ -204,52 +216,104 @@ def point_region(x, y, label, confidence, size):
             'label': label, 'role': 'point', 'confidence': round(confidence, 3), 'point': [round(x, 1), round(y, 1)]}
 
 
-# ---------------------------------------------------------------- CLIP
-def main():
-    request = json.load(sys.stdin)
-    import open_clip
-    import torch
-    from PIL import Image
+# ---------------------------------------------------------------- the council
+# Each member scores the same photo; members that are not installed sit out.
+#   clip       zone classes from a grid of windows, plus lamp posts and benches   (open_clip_torch)
+#   segformer  a per-pixel scene model; its label names are mapped onto ours    (transformers)
+#   deepforest tree crowns, trained on aerial and drone imagery                 (deepforest)
+# Zone scores are a weighted average per pixel. A member only counts where its
+# own labels are ones we map (SegFormer saying "sky" or "water" does not vote).
+WEIGHTS = {'clip': 1.0, 'segformer': 1.0}
+TREE_WEIGHT = 0.6         # how strongly a DeepForest crown pulls its pixels towards "tree"
+TREE_MIN = 0.3            # DeepForest boxes below this score are ignored
+SYNONYMS = {              # label names of scene models (ADE20K, aerial datasets) -> our classes
+    'building': {'building', 'edifice', 'house', 'skyscraper', 'roof', 'hut', 'hovel', 'shack', 'tower', 'garage'},
+    'road': {'road', 'route', 'car', 'auto', 'automobile', 'runway', 'parking', 'parking lot', 'impervious surfaces', 'impervious surface'},
+    'path': {'sidewalk', 'pavement walkway', 'path', 'footpath', 'stairs', 'steps', 'stairway', 'staircase'},
+    'grass': {'grass', 'field', 'earth', 'ground', 'land', 'soil', 'low vegetation', 'rangeland', 'plant', 'flora', 'plant life', 'flower', 'dirt track'},
+    'tree': {'tree', 'palm', 'palm tree', 'forest', 'trees'},
+}
+POINT_SYNONYMS = {'light': {'streetlight', 'street lamp', 'lamp post', 'lamppost', 'light'}, 'bench': {'bench'}}
 
-    name = os.environ.get('ERFMAP_CLIP_MODEL', 'ViT-B-32')
-    weights = os.environ.get('ERFMAP_CLIP_PRETRAINED', 'laion2b_s34b_b79k')
-    try:
-        model, _, preprocess = open_clip.create_model_and_transforms(name, pretrained=weights or None)
-    except Exception as e:
-        sys.exit('Could not load CLIP %s (%s). The first run needs internet to download the weights from Hugging Face. %s' % (name, weights, str(e)[-300:]))
-    tokenizer = open_clip.get_tokenizer(name)
-    model.eval()
-    torch.set_grad_enabled(False)
 
-    def embed_text(groups):
+def map_labels(id2label, groups):
+    """Indices of a model's labels that belong to each of our classes, matched on whole synonyms."""
+    out = {k: [] for k in groups}
+    for i, name in id2label.items():
+        names = {n.strip().lower() for n in str(name).replace(';', ',').split(',')}
+        for k, syn in groups.items():
+            if names & syn:
+                out[k].append(int(i))
+                break
+    return out
+
+
+def combine(members, shape):
+    """Weighted per-pixel average of members' class probabilities.
+
+    members: {name: (probs HxWxC, weight HxW)}. Returns HxWxC summing to 1 where anyone voted."""
+    total = np.zeros(shape + (len(CLASSES),), np.float32)
+    weight = np.zeros(shape + (1,), np.float32)
+    for probs, w in members.values():
+        total += probs * w[:, :, None]
+        weight += w[:, :, None]
+    return np.where(weight > 0, total / np.maximum(weight, 1e-6), 1.0 / len(CLASSES))
+
+
+def add_tree_crowns(probs, crowns):
+    """Pull pixels inside detected tree crowns towards "tree" by the detector's confidence."""
+    out = probs.copy()
+    onehot = np.zeros(len(CLASSES), np.float32)
+    onehot[CLASSES.index('tree')] = 1
+    h, w = probs.shape[:2]
+    for x, y, conf, r in crowns:
+        mask = np.zeros((h, w), np.uint8)
+        cv2.circle(mask, (int(round(x)), int(round(y))), max(1, int(round(r))), 1, -1)
+        a = TREE_WEIGHT * conf
+        out[mask > 0] = (1 - a) * out[mask > 0] + a * onehot
+    return out
+
+
+class Clip:
+    name = 'clip'
+
+    def __init__(self):
+        import open_clip
+        import torch
+        self.torch = torch
+        name = os.environ.get('ERFMAP_CLIP_MODEL', 'ViT-B-32')
+        weights = os.environ.get('ERFMAP_CLIP_PRETRAINED', 'laion2b_s34b_b79k')
+        self.label = 'CLIP %s (%s)' % (name, weights or 'untrained')
+        try:
+            self.model, _, self.preprocess = open_clip.create_model_and_transforms(name, pretrained=weights or None)
+        except Exception as e:
+            sys.exit('Could not load CLIP %s (%s). The first run needs internet to download the weights from Hugging Face. %s' % (name, weights, str(e)[-300:]))
+        self.tokenizer = open_clip.get_tokenizer(name)
+        self.model.eval()
+        torch.set_grad_enabled(False)
+        self.zone_text = self.embed([PROMPTS[c] for c in CLASSES])
+        self.point_kinds = list(POINTS)
+        self.point_text = torch.cat([self.embed([POINTS[k] for k in self.point_kinds]), self.zone_text])
+
+    def embed(self, groups):
         out = []
         for phrases in groups:
-            e = model.encode_text(tokenizer([t.format(p) for p in phrases for t in TEMPLATES]))
+            e = self.model.encode_text(self.tokenizer([t.format(p) for p in phrases for t in TEMPLATES]))
             e = (e / e.norm(dim=-1, keepdim=True)).mean(dim=0)
             out.append(e / e.norm())
-        return torch.stack(out)
+        return self.torch.stack(out)
 
-    zone_text = embed_text([PROMPTS[c] for c in CLASSES])
-    point_kinds = list(POINTS)
-    point_text = torch.cat([embed_text([POINTS[k] for k in point_kinds]), zone_text])
-
-    def score(crops, text):
+    def score(self, crops, text):
         rows = []
         for i in range(0, len(crops), 64):
-            e = model.encode_image(torch.stack([preprocess(c) for c in crops[i:i + 64]]))
+            e = self.model.encode_image(self.torch.stack([self.preprocess(c) for c in crops[i:i + 64]]))
             e = e / e.norm(dim=-1, keepdim=True)
             rows.append((100.0 * e @ text.T).softmax(dim=-1))
-        return torch.cat(rows).numpy() if rows else np.zeros((0, text.shape[0]))
+        return self.torch.cat(rows).numpy() if rows else np.zeros((0, text.shape[0]))
 
-    regions = []
-    for frame in request['frames']:
-        original = Image.open(frame['image']).convert('RGB')
-        W0, H0 = original.size
-        f = WORK_SIDE / max(W0, H0)
-        image = original.resize((max(1, round(W0 * f)), max(1, round(H0 * f))))
+    def zones(self, image):
+        """Per-pixel class probabilities from a grid of overlapping windows."""
         W, H = image.size
-
-        # Stage 1: score a grid of overlapping windows, spread the scores per pixel, build zones.
         P = max(32, max(W, H) // CELLS)
         S = P // 2
         xs = list(range(0, max(1, W - P) + 1, S))
@@ -260,40 +324,203 @@ def main():
             ys.append(H - P)
         boxes = [(x, y) for y in ys for x in xs]
         pad = P // 4
-        probs = score([image.crop((max(0, x - pad), max(0, y - pad), min(W, x + P + pad), min(H, y + P + pad))) for x, y in boxes], zone_text)
+        probs = self.score([image.crop((max(0, x - pad), max(0, y - pad), min(W, x + P + pad), min(H, y + P + pad))) for x, y in boxes], self.zone_text)
         acc = np.zeros((H, W, len(CLASSES)), np.float32)
         hits = np.zeros((H, W, 1), np.float32)
         for (x, y), p in zip(boxes, probs):
             acc[y:y + P, x:x + P] += p
             hits[y:y + P, x:x + P] += 1
-        pixel = acc / np.maximum(hits, 1)
+        self.P = P
+        return acc / np.maximum(hits, 1), np.ones((H, W), np.float32)
+
+    def points(self, image):
+        """Per-pixel lamp post and bench scores from a finer grid, kept only where they beat every surface."""
+        W, H = image.size
+        Q = max(24, self.P // 2)
+        boxes = [(x, y) for y in range(0, H - Q + 1, Q) for x in range(0, W - Q + 1, Q)]
+        probs = self.score([image.crop((x, y, x + Q, y + Q)) for x, y in boxes], self.point_text)
+        out = {k: np.zeros((H, W), np.float32) for k in self.point_kinds}
+        n = len(self.point_kinds)
+        for (x, y), p in zip(boxes, probs):
+            for o, k in enumerate(self.point_kinds):
+                if p[o] >= POINT_MARGIN * float(p[n:].max()):
+                    out[k][y:y + Q, x:x + Q] = p[o]
+        return out, Q
+
+
+class SegFormer:
+    name = 'segformer'
+
+    def __init__(self):
+        import torch
+        from transformers import AutoImageProcessor, AutoModelForSemanticSegmentation
+        self.torch = torch
+        name = os.environ.get('ERFMAP_SEGFORMER_MODEL', 'nvidia/segformer-b2-finetuned-ade-512-512')
+        self.label = 'SegFormer ' + name
+        self.processor = AutoImageProcessor.from_pretrained(name)
+        self.model = AutoModelForSemanticSegmentation.from_pretrained(name).eval()
+        id2label = self.model.config.id2label
+        self.zone_ids = map_labels(id2label, SYNONYMS)
+        self.point_ids = map_labels(id2label, POINT_SYNONYMS)
+        if not any(self.zone_ids.values()):
+            raise RuntimeError('none of its labels match building, road, path, grass or tree')
+
+    def probabilities(self, image, tile=512):
+        """Softmax over the model's own labels for every pixel, run in tiles to keep detail."""
+        W, H = image.size
+        out = None
+        for y in range(0, H, tile):
+            for x in range(0, W, tile):
+                crop = image.crop((x, y, min(W, x + tile), min(H, y + tile)))
+                inputs = self.processor(images=crop, return_tensors='pt')
+                with self.torch.no_grad():
+                    logits = self.model(**inputs).logits
+                logits = self.torch.nn.functional.interpolate(logits, size=(crop.size[1], crop.size[0]), mode='bilinear', align_corners=False)
+                p = logits.softmax(dim=1)[0].permute(1, 2, 0).numpy()
+                if out is None:
+                    out = np.zeros((H, W, p.shape[2]), np.float32)
+                out[y:y + crop.size[1], x:x + crop.size[0]] = p
+        return out
+
+    def zones(self, image):
+        self.raw = self.probabilities(image)
+        mapped = np.stack([self.raw[:, :, ids].sum(axis=2) if ids else np.zeros(self.raw.shape[:2], np.float32) for ids in (self.zone_ids[c] for c in CLASSES)], axis=2)
+        mass = mapped.sum(axis=2)
+        return mapped / np.maximum(mass, 1e-6)[:, :, None], mass
+
+    def points(self, image):
+        H, W = self.raw.shape[:2]
+        return {k: self.raw[:, :, ids].sum(axis=2) if ids else np.zeros((H, W), np.float32) for k, ids in self.point_ids.items()}
+
+
+class DeepForest:
+    name = 'deepforest'
+
+    def __init__(self):
+        from deepforest import main as df
+        model = os.environ.get('ERFMAP_DEEPFOREST_MODEL', 'weecology/deepforest-tree')
+        self.label = 'DeepForest ' + model
+        self.model = df.deepforest()                      # 1.4+ loads the default tree model here
+        if hasattr(self.model, 'load_model') and model != 'weecology/deepforest-tree':
+            self.model.load_model(model_name=model)
+        elif getattr(self.model, 'model', None) is None and hasattr(self.model, 'use_release'):
+            self.model.use_release()                      # DeepForest before 1.4
+
+    def crowns(self, path, f):
+        """Tree crowns as (x, y, confidence, radius) in work pixels."""
+        boxes = self.model.predict_tile(path=path, patch_size=400, patch_overlap=0.1)
+        out = []
+        if boxes is None:
+            return out
+        for row in boxes.itertuples():
+            if float(row.score) < TREE_MIN:
+                continue
+            x, y = (row.xmin + row.xmax) / 2 * f, (row.ymin + row.ymax) / 2 * f
+            r = max(row.xmax - row.xmin, row.ymax - row.ymin) / 2 * f
+            out.append((float(x), float(y), round(float(row.score), 3), float(r)))
+        return out
+
+
+def council_points(image, members, f):
+    """Lamp posts and benches: candidates from any member, confidence averaged over every member that can see them."""
+    W, H = image.size
+    maps, spacing = [], 24
+    for m in members:
+        if isinstance(m, Clip):
+            scores, spacing = m.points(image)
+        else:
+            scores = m.points(image)
+        maps.append((m.name, scores))
+    found = []
+    for kind in POINTS:
+        layers = [(name, scores[kind]) for name, scores in maps if kind in scores]
+        if not layers:
+            continue
+        r = max(2, spacing // 2)
+        pooled = [cv2.dilate(v, np.ones((2 * r + 1, 2 * r + 1), np.uint8)) for _, v in layers]   # each member's best nearby
+        mean = np.mean(pooled, axis=0)
+        # One member must be sure; the average decides the confidence, so a lone vote is flagged for review.
+        mask = (np.max(pooled, axis=0) >= POINT_MIN) & (mean >= POINT_MIN / 2)
+        count, comp, stats, cent = cv2.connectedComponentsWithStats(mask.astype(np.uint8))
+        for c in range(1, count):
+            x, y = cent[c]
+            xi, yi = int(round(x)), int(round(y))
+            said = {name: round(float(p[yi, xi]), 3) for (name, _), p in zip(layers, pooled)}
+            found.append((float(mean[yi, xi]), kind, x, y, said, spacing))
+    kept = []
+    for item in sorted(found, key=lambda q: -q[0]):                     # one point per neighbourhood
+        if all(abs(item[2] - k[2]) >= item[5] or abs(item[3] - k[3]) >= item[5] for k in kept):
+            kept.append(item)
+    return kept
+
+
+def load_members():
+    members, notes = [], []
+    for cls, env in ((Clip, 'ERFMAP_CLIP'), (SegFormer, 'ERFMAP_SEGFORMER'), (DeepForest, 'ERFMAP_DEEPFOREST')):
+        if os.environ.get(env, '').lower() == 'off':
+            notes.append('%s turned off' % cls.name)
+            continue
+        try:
+            members.append(cls())
+            print('Council member ready: %s' % members[-1].label, file=sys.stderr)
+        except ImportError:
+            notes.append('%s not installed' % cls.name)
+        except SystemExit:
+            raise
+        except Exception as e:
+            notes.append('%s could not load (%s)' % (cls.name, str(e)[-200:]))
+            print('Council member %s skipped: %s' % (cls.name, e), file=sys.stderr)
+    if not any(m.name in WEIGHTS for m in members):
+        sys.exit('No zone model could load (%s). Install open_clip_torch or transformers.' % '; '.join(notes))
+    return members, notes
+
+
+def main():
+    request = json.load(sys.stdin)
+    from PIL import Image
+
+    members, notes = load_members()
+    regions = []
+    for frame in request['frames']:
+        original = Image.open(frame['image']).convert('RGB')
+        W0, H0 = original.size
+        f = WORK_SIDE / max(W0, H0)
+        image = original.resize((max(1, round(W0 * f)), max(1, round(H0 * f))))
+        W, H = image.size
+
+        # Stage 1: every zone member votes per pixel; tree crowns from DeepForest pull towards "tree".
+        votes, weighted = {}, {}
+        for m in members:
+            if m.name in WEIGHTS:
+                probs, w = m.zones(image)
+                votes[m.name] = probs
+                weighted[m.name] = (probs, w * WEIGHTS[m.name])
+        pixel = combine(weighted, (H, W))
+        crowns = None
+        for m in members:
+            if isinstance(m, DeepForest):
+                crowns = m.crowns(frame['image'], f)
+                pixel = add_tree_crowns(pixel, crowns)
         work = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
-        zones = build_zones(work, pixel, (W0, H0))
+        zones = build_zones(work, pixel, (W0, H0), trees=crowns, votes=votes if len(votes) > 1 else None)
         for r in zones:
             regions.append({'frame': frame['id'], **r})
         roofs = [np.array(r['polygon'], np.float32).reshape(-1, 1, 2) for r in zones if r.get('model_label') == 'building']
 
-        # Stage 2: lamp posts and benches as points, anywhere in the photo.
-        Q = max(24, P // 2)
-        boxes = [(x, y) for y in range(0, H - Q + 1, Q) for x in range(0, W - Q + 1, Q)]
-        probs = score([image.crop((x, y, x + Q, y + Q)) for x, y in boxes], point_text)
-        found = []
-        for (x, y), p in zip(boxes, probs):
-            o = int(p[:len(point_kinds)].argmax())
-            if p[o] >= POINT_MIN and p[o] >= POINT_MARGIN * float(p[len(point_kinds):].max()):
-                found.append((float(p[o]), point_kinds[o], x + Q / 2, y + Q / 2))
-        kept = []
-        for prob, kind, x, y in sorted(found, reverse=True):          # one point per neighbourhood
-            if all(abs(x - kx) >= Q or abs(y - ky) >= Q for _, _, kx, ky in kept):
-                kept.append((prob, kind, x, y))
-        for prob, kind, x, y in kept:
+        # Stage 2: lamp posts and benches as points, anywhere but on a roof.
+        for prob, kind, x, y, said, spacing in council_points(image, [m for m in members if m.name in WEIGHTS], f):
             if any(cv2.pointPolygonTest(roof, (x / f, y / f), False) >= 0 for roof in roofs):
-                continue                                              # no benches or lamp posts on roofs
-            regions.append({'frame': frame['id'], **point_region(x / f, y / f, kind, prob, Q / f)})
+                continue
+            region = point_region(x / f, y / f, kind, prob, spacing / f)
+            if len(said) > 1:
+                region['votes'] = said
+            regions.append({'frame': frame['id'], **region})
         print('Labelled %s: %d zones and points so far' % (frame['id'], len(regions)), file=sys.stderr)
 
-    json.dump({'model': {'name': 'CLIP zones + points ' + name, 'version': weights or 'untrained',
-                         'note': 'Zero-shot: a general-purpose image model compared with text prompts on a grid of windows; not trained on drone surveys.'},
+    names = [m.label for m in members]
+    json.dump({'model': {'name': 'Council: ' + ' + '.join(names), 'version': ', '.join(names),
+                         'members': [m.name for m in members], 'left_out': notes,
+                         'note': 'Zero-shot and general-purpose models voting per pixel; none is trained on this site. Confidence is the combined vote.'},
                'regions': regions}, sys.stdout)
 
 
