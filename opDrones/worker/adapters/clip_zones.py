@@ -141,7 +141,9 @@ def build_zones(image, probs, size):
     b, pth, rd, gr, tr = (mean[:, CLASSES.index(c)] for c in CLASSES)
     best = mean.max(axis=1)
     is_building = b >= PRIORITY * best
-    is_line = ~is_building & (np.maximum(pth, rd) >= PRIORITY * best)
+    # Where a tree crown is the best match, the ground under it is left to grass (the tree becomes a point),
+    # so tree shadows and canopies are not mistaken for road.
+    is_line = ~is_building & (np.maximum(pth, rd) >= PRIORITY * best) & (tr < best)
     is_path = is_line & (pth >= rd)
     is_road = is_line & (rd > pth)
     building, path, road = is_building[seg], is_path[seg], is_road[seg]
@@ -179,10 +181,12 @@ def build_zones(image, probs, size):
                 regions.append({'polygon': p['polygon'], 'label': ZONE_KIND[label], 'model_label': label, 'role': 'zone', 'confidence': round(conf, 3)})
 
     # Trees: one point per crown, wherever trees dominate (usually over grass).
-    tree = (tr >= best)[seg] & ~building
+    tree = (tr >= PRIORITY * best)[seg] & ~building & ~path & ~road
     tree = cv2.morphologyEx(tree.astype(np.uint8), cv2.MORPH_OPEN, small)
     crown = max(8, block // 2)
-    dist = cv2.distanceTransform(tree, cv2.DIST_L2, 5)
+    # Pad with background first: otherwise OpenCV treats the photo edge as far from any edge,
+    # and the deepest "crown centres" all land on the border.
+    dist = cv2.distanceTransform(cv2.copyMakeBorder(tree, 1, 1, 1, 1, cv2.BORDER_CONSTANT, value=0), cv2.DIST_L2, 5)[1:-1, 1:-1]
     peaks = (dist >= cv2.dilate(dist, np.ones((crown, crown), np.uint8))) & (dist >= crown / 4)
     ys, xs = np.nonzero(peaks)
     taken = []
@@ -264,8 +268,10 @@ def main():
             hits[y:y + P, x:x + P] += 1
         pixel = acc / np.maximum(hits, 1)
         work = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
-        for r in build_zones(work, pixel, (W0, H0)):
+        zones = build_zones(work, pixel, (W0, H0))
+        for r in zones:
             regions.append({'frame': frame['id'], **r})
+        roofs = [np.array(r['polygon'], np.float32).reshape(-1, 1, 2) for r in zones if r.get('model_label') == 'building']
 
         # Stage 2: lamp posts and benches as points, anywhere in the photo.
         Q = max(24, P // 2)
@@ -281,6 +287,8 @@ def main():
             if all(abs(x - kx) >= Q or abs(y - ky) >= Q for _, _, kx, ky in kept):
                 kept.append((prob, kind, x, y))
         for prob, kind, x, y in kept:
+            if any(cv2.pointPolygonTest(roof, (x / f, y / f), False) >= 0 for roof in roofs):
+                continue                                              # no benches or lamp posts on roofs
             regions.append({'frame': frame['id'], **point_region(x / f, y / f, kind, prob, Q / f)})
         print('Labelled %s: %d zones and points so far' % (frame['id'], len(regions)), file=sys.stderr)
 

@@ -122,5 +122,16 @@ class ZonesTest(unittest.TestCase):
         self.assertTrue(any(inside(z['polygon'], *r['point']) for z in self.of('road')))
 
 
+    def test_trees_along_the_edge_are_placed_on_the_crowns(self):
+        image, probs = scene()
+        probs[:120, :, :] = 0.06
+        probs[:120, :, cz.CLASSES.index('tree')] = 0.76                # a row of trees along the top edge
+        trees = [r['point'] for r in cz.build_zones(image, probs, SIZE) if r['label'] == 'tree']
+        edge = [p for p in trees if p[1] < 400]
+        self.assertTrue(edge)
+        for x, y in edge:
+            self.assertGreater(y, 40, 'crown centres sit inside the trees, not on the photo border')
+
+
 if __name__ == '__main__':
     unittest.main()
