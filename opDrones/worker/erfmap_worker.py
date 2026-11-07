@@ -210,11 +210,65 @@ def sides(corners):
 
 
 # ---------------------------------------------------------------- 0. probe
+def photo_exif(path):
+    """Camera tags from a photo, if Pillow is installed. Location tags are only noted."""
+    try:
+        from PIL import Image, ExifTags
+    except ImportError:
+        return None
+    try:
+        with Image.open(path) as image:
+            exif = image.getexif()
+            tags = {ExifTags.TAGS.get(k, str(k)): v for k, v in exif.items()}
+            try:
+                tags.update({ExifTags.TAGS.get(k, str(k)): v for k, v in exif.get_ifd(0x8769).items()})
+            except Exception:
+                pass
+            keep = ('Make', 'Model', 'Software', 'DateTimeOriginal', 'DateTime', 'FocalLength', 'FocalLengthIn35mmFilm', 'ExposureTime', 'FNumber', 'ISOSpeedRatings', 'Orientation')
+            out = {k: str(tags[k]) for k in keep if k in tags}
+            if 0x8825 in exif or 'GPSInfo' in tags:
+                out['GPSInfo'] = 'present (not used)'
+            return out
+    except Exception:
+        return None
+
+
+def probe_photos(job, meta):
+    need_cv()
+    photos, warnings = [], []
+    for i, original in enumerate(meta['originals']):
+        path = Path(job) / original['path']
+        image = cv2.imread(str(path), cv2.IMREAD_COLOR)
+        if image is None:
+            warnings.append('%s could not be read as an image and is skipped.' % original['name'])
+            continue
+        photos.append({'name': original['name'], 'path': original['path'], 'width': image.shape[1], 'height': image.shape[0],
+                       'size_bytes': original.get('size'), 'exif': photo_exif(path)})
+        progress((i + 1) / len(meta['originals']), 'Reading photo %d of %d' % (i + 1, len(meta['originals'])))
+    if not photos:
+        raise RuntimeError('None of the uploaded files could be read as photos.')
+    first = photos[0]
+    if first['exif'] is None:
+        warnings.append('Install Pillow (pip install pillow) to read camera tags from photos. Processing works without it.')
+    if any(p['exif'] and 'GPSInfo' in p['exif'] for p in photos):
+        warnings.append('Some photos contain GPS tags. They are kept in the originals but not used: this pipeline produces an unreferenced local map.')
+    if len(photos) == 1:
+        warnings.append('One photo: there is no overlap to cross-check detections, so every feature is seen in one frame only.')
+    elif len(photos) < 5:
+        warnings.append('%d photos: overlap between photos is usually weaker than in video, so alignment and cross-frame merging have less to work with. Aim for 60%%+ overlap between neighbouring shots.' % len(photos))
+    metadata = {'media': 'photos', 'count': len(photos), 'photos': photos, 'width': first['width'], 'height': first['height'],
+                'camera_tags': first['exif'] or {}, 'duration_s': None, 'codec': 'still images'}
+    return {'status': 'complete', 'summary': '%d photo%s, first %dx%d' % (len(photos), '' if len(photos) == 1 else 's', first['width'], first['height']),
+            'metadata': metadata, 'warnings': warnings}
+
+
 def stage_probe(job):
+    meta = read_json(Path(job) / 'job.json')
+    if meta.get('media') == 'photos':
+        return probe_photos(job, meta)
     ffprobe = tool('ffprobe')
     if not ffprobe:
         raise Unavailable('ffprobe (part of FFmpeg) was not found on PATH. Install FFmpeg or set ERFMAP_FFPROBE.')
-    meta = read_json(Path(job) / 'job.json')
     video = Path(job) / meta['original']['path']
     progress(.2, 'Reading container and stream metadata')
     out = subprocess.run([ffprobe, '-v', 'error', '-print_format', 'json', '-show_format', '-show_streams', str(video)],
@@ -291,8 +345,33 @@ def frame_metrics(image):
     }
 
 
+PHOTO_MAX_SIDE = 2000
+
+
+def photo_frames(job, out):
+    """Photos skip extraction: each becomes a frame, downscaled to at most PHOTO_MAX_SIDE."""
+    photos = stage_result(job, 'probe')['metadata']['photos']
+    frames = []
+    for i, photo in enumerate(photos):
+        image = imread(Path(job) / photo['path'])
+        scale = min(1.0, PHOTO_MAX_SIDE / max(image.shape[:2]))
+        if scale < 1:
+            image = cv2.resize(image, (round(image.shape[1] * scale), round(image.shape[0] * scale)), interpolation=cv2.INTER_AREA)
+        path = out / ('f%04d.jpg' % (i + 1))
+        cv2.imwrite(str(path), image, [cv2.IMWRITE_JPEG_QUALITY, 92])
+        frames.append({'id': path.stem, 'index': i, 'time_s': None, 'source': photo['name'], 'image': rel(job, path),
+                       'width': image.shape[1], 'height': image.shape[0], 'metrics': frame_metrics(image)})
+        progress(.9 * (i + 1) / len(photos), 'Scoring photo %d of %d' % (i + 1, len(photos)))
+    return frames
+
+
 def stage_frames(job):
     need_cv()
+    if (read_json(Path(job) / 'job.json') or {}).get('media') == 'photos':
+        out = stage_dir(job, 'frames')
+        for old in out.glob('f*.jpg'):
+            old.unlink()
+        return score_frames(photo_frames(job, out), None)
     ffmpeg = tool('ffmpeg')
     if not ffmpeg:
         raise Unavailable('FFmpeg was not found on PATH. Install FFmpeg or set ERFMAP_FFMPEG.')
@@ -319,6 +398,10 @@ def stage_frames(job):
         frames.append({'id': path.stem, 'index': i, 'time_s': round(i / fps, 2), 'image': rel(job, path),
                        'width': image.shape[1], 'height': image.shape[0], 'metrics': frame_metrics(image)})
         progress(.3 + .6 * (i + 1) / len(files), 'Scoring frame %d of %d' % (i + 1, len(files)))
+    return score_frames(frames, fps)
+
+
+def score_frames(frames, fps):
     sharp = sorted(f['metrics']['sharpness'] for f in frames)
     median = sharp[len(sharp) // 2]
     blur_limit = max(25.0, 0.35 * median)
@@ -336,15 +419,22 @@ def stage_frames(job):
             flags.append('tilted (sky visible)')
         f['flags'] = flags
         f['usable'] = not flags
+    photos = fps is None
+    if photos:
+        # A handful of photos cannot be judged against a video's median sharpness,
+        # and every usable one matters, so only clearly blurred photos are flagged.
+        for f in frames:
+            f['flags'] = [x for x in f['flags'] if x != 'blurry'] + (['blurry'] if f['metrics']['sharpness'] < 25 else [])
+            f['usable'] = not f['flags']
     usable = [f for f in frames if f['usable']]
     warnings = ['Camera tilt is estimated only from sky visible in frame; there is no gimbal telemetry to measure it.']
     if not usable:
-        raise RuntimeError('None of the %d frames are usable (all blurry, dark, tilted or featureless).' % len(frames))
-    if len(usable) < 3:
+        raise RuntimeError('None of the %d %s are usable (all blurry, dark, tilted or featureless).' % (len(frames), 'photos' if photos else 'frames'))
+    if len(usable) < 3 and not photos:
         warnings.append('Only %d usable frames. Cross-frame merging needs overlap between several frames.' % len(usable))
-    return {'status': 'needs_review' if len(usable) < len(frames) / 2 or len(usable) < 3 else 'complete',
-            'summary': '%d of %d frames usable' % (len(usable), len(frames)),
-            'sample_fps': fps, 'blur_limit': round(blur_limit, 1), 'frames': frames, 'warnings': warnings}
+    return {'status': 'needs_review' if len(usable) < len(frames) / 2 or (len(usable) < 3 and not photos) else 'complete',
+            'summary': '%d of %d %s usable' % (len(usable), len(frames), 'photos' if photos else 'frames'),
+            'sample_fps': fps, 'blur_limit': 25 if photos else round(blur_limit, 1), 'frames': frames, 'warnings': warnings}
 
 
 # ---------------------------------------------------------------- 2. correction
@@ -385,16 +475,16 @@ def stage_correction(job):
         progress(.4 * (i + 1) / len(frames), 'Cleaning frame %d of %d' % (i + 1, len(frames)))
 
     # Planar alignment: chain consecutive-frame homographies to a middle reference frame.
-    orb = cv2.ORB_create(3000)
+    photos = (read_json(Path(job) / 'job.json') or {}).get('media') == 'photos'
+    orb = cv2.ORB_create(5000 if photos else 3000)
     matcher = cv2.BFMatcher(cv2.NORM_HAMMING)
     feats = []
     for c in corrected:
         gray = cv2.cvtColor(imread(Path(job) / c['after']), cv2.COLOR_BGR2GRAY)
         feats.append(orb.detectAndCompute(gray, None))
-    pair = [None] * len(corrected)   # pair[i]: homography from frame i to frame i-1
-    links = []
-    for i in range(1, len(corrected)):
-        (k1, d1), (k0, d0) = feats[i], feats[i - 1]
+    def match(i, j):
+        """Homography taking frame i into frame j, or None, plus the inlier count."""
+        (k1, d1), (k0, d0) = feats[i], feats[j]
         H, inliers = None, 0
         if d1 is not None and d0 is not None and len(k1) > 10 and len(k0) > 10:
             matches = [m for m, n in (p for p in matcher.knnMatch(d1, d0, k=2) if len(p) == 2) if m.distance < 0.75 * n.distance]
@@ -404,21 +494,62 @@ def stage_correction(job):
                 H, mask = cv2.findHomography(src, dst, cv2.RANSAC, 4.0)
                 inliers = int(mask.sum()) if mask is not None else 0
         ok = homography_ok(H) and inliers >= 30
-        pair[i] = H / H[2, 2] if ok else None
-        links.append({'from': corrected[i]['id'], 'to': corrected[i - 1]['id'], 'inliers': inliers, 'ok': ok})
-        progress(.4 + .4 * i / max(1, len(corrected) - 1), 'Aligning frame %d of %d' % (i + 1, len(corrected)))
-    ref = len(corrected) // 2
+        return (H / H[2, 2] if ok else None), inliers
+
+    n = len(corrected)
+    ref = n // 2
     to_ref = {ref: np.eye(3)}
-    for i in range(ref + 1, len(corrected)):
-        if pair[i] is None or (i - 1) not in to_ref:
-            break
-        to_ref[i] = to_ref[i - 1] @ pair[i]
-    for i in range(ref - 1, -1, -1):
-        if pair[i + 1] is None or (i + 1) not in to_ref:
-            break
-        to_ref[i] = to_ref[i + 1] @ np.linalg.inv(pair[i + 1])
-    h0, w0 = imread(Path(job) / corrected[ref]['after']).shape[:2]
-    corners = np.concatenate([apply_h(to_ref[i], [[0, 0], [w0, 0], [w0, h0], [0, h0]]) for i in to_ref])
+    links = []
+    if not photos:
+        # Video: chain neighbouring frames outwards from the middle frame.
+        pair = [None] * n
+        for i in range(1, n):
+            pair[i], inliers = match(i, i - 1)
+            links.append({'from': corrected[i]['id'], 'to': corrected[i - 1]['id'], 'inliers': inliers, 'ok': pair[i] is not None})
+            progress(.4 + .4 * i / max(1, n - 1), 'Aligning frame %d of %d' % (i + 1, n))
+        for i in range(ref + 1, n):
+            if pair[i] is None or (i - 1) not in to_ref:
+                break
+            to_ref[i] = to_ref[i - 1] @ pair[i]
+        for i in range(ref - 1, -1, -1):
+            if pair[i + 1] is None or (i + 1) not in to_ref:
+                break
+            to_ref[i] = to_ref[i + 1] @ np.linalg.inv(pair[i + 1])
+    else:
+        # Photos may be in any order: start from the best-connected photo, then attach
+        # each remaining photo to whichever aligned photo matches it best.
+        cache = {}
+        def pair(i, j):
+            if (i, j) not in cache:
+                cache[(i, j)] = match(i, j)
+            return cache[(i, j)]
+        if n <= 40:
+            for i in range(n):
+                for j in range(i + 1, n):
+                    pair(i, j)
+                progress(.4 + .2 * (i + 1) / n, 'Comparing photo %d of %d with the others' % (i + 1, n))
+            degree = [sum((cache[(min(i, j), max(i, j))][0] is not None) * 1000 + cache[(min(i, j), max(i, j))][1] for j in range(n) if j != i) for i in range(n)]
+            ref = max(range(n), key=lambda i: degree[i])
+            to_ref = {ref: np.eye(3)}
+        pending, tried = set(range(n)) - {ref}, 0
+        while pending:
+            best = None
+            for i in sorted(pending):
+                for j in to_ref:
+                    H, inliers = pair(i, j)
+                    tried += 1
+                    if H is not None and (best is None or inliers > best[3]):
+                        best = (i, j, H, inliers)
+            progress(.4 + .4 * (n - len(pending)) / n, 'Matching photos (%d comparisons)' % tried)
+            if best is None:
+                break
+            i, j, H, inliers = best
+            to_ref[i] = to_ref[j] @ H
+            links.append({'from': corrected[i]['id'], 'to': corrected[j]['id'], 'inliers': inliers, 'ok': True})
+            pending.discard(i)
+        for i in sorted(pending):
+            links.append({'from': corrected[i]['id'], 'to': None, 'inliers': 0, 'ok': False})
+    corners = np.concatenate([apply_h(to_ref[i], [[0, 0], [corrected[i]['width'], 0], [corrected[i]['width'], corrected[i]['height']], [0, corrected[i]['height']]]) for i in to_ref])
     lo, hi = corners.min(axis=0), corners.max(axis=0)
     span = hi - lo
     s = min(1.0, MOSAIC_MAX / max(span))
@@ -445,7 +576,7 @@ def stage_correction(job):
     if aligned < len(corrected):
         warnings.append('%d of %d usable frames could not be aligned to the reference frame (weak feature matches) and are left out of later stages.' % (len(corrected) - aligned, len(corrected)))
     return {'status': 'needs_review' if aligned < max(2, 0.6 * len(corrected)) else 'complete',
-            'summary': 'Cleaned %d frames, aligned %d to reference %s' % (len(corrected), aligned, corrected[ref]['id']),
+            'summary': 'Cleaned %d frames, %d of them aligned in one preview (reference %s)' % (len(corrected), aligned, corrected[ref]['id']),
             'lens': lens, 'cleanup': 'CLAHE contrast equalisation and light denoising', 'reference': corrected[ref]['id'],
             'frames': corrected, 'links': links, 'mosaic': {'image': rel(job, out / 'mosaic.jpg'), 'width': W, 'height': H_, 'scale': s},
             'warnings': warnings}
@@ -847,18 +978,22 @@ def stage_geometry(job):
     merged = stage_result(job, 'merging')
     labels = {l['kind']: l for l in read_json(Path(job) / 'labels.json', {'labels': []})['labels']}
     calibration = read_json(Path(job) / 'calibration.json', {'markers': []})
+    side_m = float(calibration.get('markerSideM') or MARKER_SIDE_M)
     confirmed = [m for m in calibration.get('markers', []) if m.get('confirmed') and len(m.get('corners', [])) == 4]
-    if not confirmed:
-        return {'status': 'needs_review', 'summary': 'Waiting for scale. Confirm at least one ground marker in Scale calibration.',
-                'scale': None, 'features': [], 'warnings': ['Without a confirmed marker there is no scale, so no map geometry is produced.']}
-    per_marker = [MARKER_SIDE_M / float(np.mean(sides(m['corners']))) for m in confirmed]
-    m_per_px = float(np.median(per_marker))
-    spread = float(np.std(per_marker) / m_per_px) if len(per_marker) > 1 else None
+    references = [r for r in calibration.get('references', []) if r.get('confirmed', True) and r.get('metres', 0) > 0]
+    if not confirmed and not references:
+        return {'status': 'needs_review', 'summary': 'Waiting for scale. Confirm a ground marker or add a measured distance in Scale calibration.',
+                'scale': None, 'features': [], 'warnings': ['Without a confirmed scale reference there is no scale, so no map geometry is produced.']}
+    per_marker = [side_m / float(np.mean(sides(m['corners']))) for m in confirmed]
+    per_reference = [r['metres'] / float(np.hypot(r['a'][0] - r['b'][0], r['a'][1] - r['b'][1])) for r in references]
+    estimates = per_marker + per_reference
+    m_per_px = float(np.median(estimates))
+    spread = float(np.std(estimates) / m_per_px) if len(estimates) > 1 else None
     warnings = ['Locally scaled, unreferenced: coordinates are metres from an arbitrary origin, axes follow the reference frame (not north), and perspective, terrain and lens effects are not removed.']
-    if len(confirmed) == 1:
-        warnings.append('Only one marker is confirmed. Scale is reliable near that marker only; distances far from it may be off.')
+    if len(estimates) == 1:
+        warnings.append('Only one scale reference is confirmed. Scale is reliable near it only; distances far from it may be off.')
     if spread is not None and spread > 0.1:
-        warnings.append('Confirmed markers disagree on scale by %.0f%%. This usually means camera tilt, terrain relief or a poor alignment.' % (spread * 100))
+        warnings.append('Scale references disagree by %.0f%%. This usually means camera tilt, terrain relief, a mis-clicked point or a poor alignment.' % (spread * 100))
     features = []
     for g in merged['merged']:
         poly = np.array(g['polygon'], dtype=np.float64) * m_per_px
@@ -892,9 +1027,9 @@ def stage_geometry(job):
         f['p'] = [[round(x - origin[0], 3), round(y - origin[1], 3)] for x, y in f['p']]
         f['region'] = [[round(x - origin[0], 3), round(y - origin[1], 3)] for x, y in f['region']]
     extent = (allp.max(axis=0) - origin + 2).round(2).tolist()
-    return {'status': 'needs_review', 'summary': '%d proposed features at %.4f m per mosaic pixel from %d marker(s)' % (len(features), m_per_px, len(confirmed)),
-            'scale': {'m_per_px': m_per_px, 'markers': len(confirmed), 'spread': spread, 'per_marker': per_marker,
-                      'origin_px': (origin / m_per_px).tolist(), 'marker_side_m': MARKER_SIDE_M},
+    return {'status': 'needs_review', 'summary': '%d proposed features at %.4f m per mosaic pixel from %d marker(s) and %d measured distance(s)' % (len(features), m_per_px, len(confirmed), len(references)),
+            'scale': {'m_per_px': m_per_px, 'markers': len(confirmed), 'references': len(references), 'spread': spread, 'per_marker': per_marker, 'per_reference': per_reference,
+                      'origin_px': (origin / m_per_px).tolist(), 'marker_side_m': side_m},
             'extent_m': extent, 'mosaic': merged['mosaic'], 'features': features, 'warnings': warnings}
 
 
