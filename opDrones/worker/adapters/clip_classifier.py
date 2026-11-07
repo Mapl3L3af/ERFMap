@@ -35,6 +35,9 @@ PROMPTS = {
     'light': ['a lamp post', 'a street light seen from above'],
     'bench': ['a park bench', 'a bench'],
 }
+# Most of a site is grass, path or road, so those start more likely. Buildings,
+# trees, lamp posts and benches sit on top of them.
+PRIOR = {'grass': 3.0, 'path': 3.0, 'road': 3.0}
 TEMPLATES = ['an aerial photo of {}.', 'a top-down drone photo of {}.']
 MIN_SIDE = 4        # px; anything smaller has no pixels to compare
 
@@ -70,6 +73,7 @@ def main():
         e = e.mean(dim=0)
         text.append(e / e.norm())
     text = torch.stack(text)
+    prior = torch.tensor([PRIOR.get(k, 1.0) for k in classes])
 
     predictions, batch, ids = [], [], []
 
@@ -78,7 +82,8 @@ def main():
             return
         e = model.encode_image(torch.stack(batch))
         e = e / e.norm(dim=-1, keepdim=True)
-        probs = (100.0 * e @ text.T).softmax(dim=-1)
+        probs = (100.0 * e @ text.T).softmax(dim=-1) * prior
+        probs = probs / probs.sum(dim=-1, keepdim=True)
         for rid, p in zip(ids, probs):
             i = int(p.argmax())
             predictions.append({'id': rid, 'label': classes[i], 'confidence': round(float(p[i]), 3),

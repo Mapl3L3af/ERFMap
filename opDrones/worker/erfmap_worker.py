@@ -898,8 +898,10 @@ def stage_regions(job):
 
 
 # ---------------------------------------------------------------- 5. classification
-# Touching grass regions are joined into one block per photo (or per preview for video).
-LARGE_ONLY = {'grass'}
+# Base surfaces: most of a site is grass, path or road, and other features sit on
+# top of them. Touching regions of one base kind are joined into one block per photo
+# (or per preview for video), with holes left by features on top filled in.
+BASE_KINDS = {'grass', 'path', 'road'}
 
 
 def stage_classification(job):
@@ -969,15 +971,15 @@ def stage_classification(job):
 
 # ---------------------------------------------------------------- 6. merging
 def join_blocks(merged, size, s, per_image=False):
-    """Join touching grass or bush features into one feature per block (within one photo when photos are calibrated separately)."""
+    """Join touching features of one base kind into one block (within one photo when photos are calibrated separately)."""
     if per_image:
         out, frames = [], sorted({tuple(m['frames']) for m in merged})
         for key in frames:
             out += join_blocks([m for m in merged if tuple(m['frames']) == key], size, s)
         return out
-    out = [m for m in merged if m['kind'] not in LARGE_ONLY]
+    out = [m for m in merged if m['kind'] not in BASE_KINDS]
     gap = max(3, int(0.01 * max(size)))
-    for big in sorted(LARGE_ONLY):
+    for big in sorted(BASE_KINDS):
         group = [m for m in merged if m['kind'] == big]
         if len(group) < 2:
             out += group
@@ -1222,6 +1224,7 @@ def geometry_per_image(job, merged, labels, calibration):
                          'image': {'frame': i['frame'], 'source': i['source']},
                          'calibration': {'id': i['reference'], 'metres': round(i['metres'], 4), 'label': i['label'], 'segment_px': i['segment_px'],
                                          'm_per_px': round(i['m_per_px'], 6), 'distance_from_reference_m': round(distance, 2), 'flags': i['flags']}})
+    features.sort(key=lambda f: f['kind'] not in BASE_KINDS)    # base surfaces first, features on top after
     warnings = ['Locally scaled, unreferenced: each photo has its own scale from one measured distance and its own arbitrary origin. Photos are placed side by side; their real positions relative to each other are unknown. North is unknown, and perspective, terrain, tilt and lens effects are not removed.',
                 'One distance calibrates scale near the measured segment. Sizes further away in the same photo are approximate.']
     if missing:
@@ -1272,6 +1275,7 @@ def stage_geometry(job):
                          'pixel_polygon': g['polygon'], 'confidence': g['confidence'], 'frames': g['frames'],
                          'flags': g['flags'] + ([] if g['kind'] else ['needs label']), 'note': note,
                          'area_m2': round(polygon_area(poly), 2)})
+    features.sort(key=lambda f: f['kind'] not in BASE_KINDS)    # base surfaces first, features on top after
     allp = np.concatenate([np.array(f['p']) for f in features]) if features else np.zeros((1, 2))
     origin = allp.min(axis=0) - 2
     for f in features:

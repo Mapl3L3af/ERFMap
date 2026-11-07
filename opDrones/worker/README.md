@@ -61,7 +61,7 @@ Then restart the server. The Classification stage picks it up by itself; the wor
 - It runs on a laptop CPU, a few seconds per batch of 32 regions. No GPU or training needed.
 - It assigns only these kinds: building (roofs), grass, tree, path (sidewalks and footpaths), road, light (lamp posts) and bench. Each has a few text prompts in `PROMPTS` in the adapter ("an aerial photo of a lawn", ...). Edit that list to change the set.
 - Every region gets the closest of these kinds; nothing is left out. Low-confidence results are flagged for review.
-- Touching grass regions are joined into one block per photo (`LARGE_ONLY` in `erfmap_worker.py`).
+- Grass, path and road are treated as the base surfaces: they start 3 times more likely (`PRIOR` in the adapter), touching regions of the same base kind are joined into one block per photo with holes filled in, and they come first in the output so buildings, trees, lamp posts and benches sit on top of them (`BASE_KINDS` in `erfmap_worker.py`).
 - It is a general-purpose image model, not trained on drone surveys. Expect reasonable results on grass, water, roads, roofs and trees, and treat everything as a proposal.
 - `ERFMAP_CLIP_MODEL` and `ERFMAP_CLIP_PRETRAINED` choose another [OpenCLIP model](https://github.com/mlfoundations/open_clip), e.g. `ViT-L-14` / `laion2b_s32b_b82k` for better accuracy at about 3x the time.
 
