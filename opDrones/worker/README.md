@@ -25,7 +25,7 @@ Set these before starting the server; the worker inherits the server's environme
 | 1. Frame selection | Video: FFmpeg samples up to 60 frames (at most 2 per second). Photos: each photo becomes a frame, downsized to 2000 px on the long side, and only clearly blurry or dark photos are dropped. OpenCV scores sharpness (Laplacian variance), brightness, contrast and edge texture. Frames are flagged as blurry, dark, overexposed, low texture or tilted (bright, featureless sky band). | Works. Tilt is a heuristic because the worker does not parse gimbal telemetry. |
 | 2. Image correction | CLAHE contrast equalisation and light denoising, with before/after previews. Lens correction runs only if `camera.json` (`fx`, `fy`, `cx`, `cy`, `dist`) is in the job folder. **Video:** ORB feature matching and RANSAC homographies chain each frame to a middle reference frame, giving a planar alignment preview. **Photos:** not stitched. Each photo is calibrated on its own, so the photos are laid out side by side on a photo sheet. | Works. Lens correction is unavailable without calibration. The video preview is not an orthomosaic. |
 | Scale calibration | **Photos:** one measured distance per photo. The reviewer picks a photo, clicks the two ends of something measured on the ground (sidewalk width, tape, two cones) and enters the length in ft, in, m or cm. Points and distance can be redone or edited. Photos without one are left out of the map. Segments are flagged when short (under 10% of the photo), near the photo edge, leaving the photo, ending on a featureless spot, or in a blurry or tilted photo. **Video:** measured distances and square boards (detected, then confirmed by the reviewer); the scale is their median. | Works. The scale comes only from what the reviewer enters and confirms. |
-| 3. Region detection | Baseline: k-means colour clustering on up to 10 keyframes, turned into polygons. Or `ERFMAP_SEGMENTER`. | Baseline works. It is not a learned model. |
+| 3. Region detection | With `open_clip_torch` installed: CLIP zones and objects (below), which also label each region. Otherwise k-means colour clustering, or `ERFMAP_SEGMENTER`. Up to 10 video keyframes, or every photo. | Works. Neither is a model trained on drone surveys. |
 | 4. Classification | The bundled CLIP zero-shot adapter (`adapters/clip_classifier.py`) runs automatically once `open_clip_torch` is installed, or any command set in `ERFMAP_CLASSIFIER`. Predictions below 0.6 confidence, or with no label, are marked for review. | **Unavailable** until one is installed. Regions stay unlabelled, and the reviewer labels them. |
 | 5. Cross-frame merging | Regions are warped into the preview, matched by IoU over 0.3 (one per frame) and merged by majority vote. Label conflicts, varying geometry and single-frame detections are flagged. | Works |
 | 6. Map geometry | **Photos:** each photo's features are scaled by that photo's own distance; no scale is shared between photos. Photos are placed side by side in the output, because their real positions relative to each other are unknown. Each feature keeps its source photo, its calibration, its approximate size and its distance from the reference segment, and is flagged when it is far from it. **Video:** metres per preview pixel is the median over confirmed markers and measured distances, and disagreement is reported. Areas stay polygons, lines become the long axis of the region and points become centroids, following erfMap's `kinds` geometry. | Works once a photo (or the video) has a scale |
@@ -49,21 +49,23 @@ Both adapters are shell commands. They receive JSON on stdin and must print JSON
 
 Labels are mapped to erfMap kinds through `intake/label-map.json`. A label that already matches a kind needs no entry. Unmapped labels become unknown and are flagged for review. To extend the label set, add kinds to `erfmap-survey/model.js` (the UI reads them from there) and map new model labels in `label-map.json`.
 
-### Free classifier: CLIP zero-shot
+### Free labelling: CLIP zones and objects
 
 ```
 pip install open_clip_torch pillow
 ```
 
-Then restart the server. The Classification stage picks it up by itself; the worker status on the intake home page shows it as the classifier. Set `ERFMAP_CLASSIFIER=off` to turn it off, or to any other command to use a different model.
+Then restart the server. Region detection and classification pick it up by themselves. It labels in two passes (`adapters/clip_zones.py`):
 
+1. **Zones.** Each photo is covered by a grid of overlapping windows, and CLIP labels each one as grass, path (sidewalks and footpaths), road, building or tree. Scores are averaged per grid cell and smoothed, and neighbouring cells with the same label become one zone. Every part of the photo ends up in a zone. Grass, path and road start twice as likely (`PRIOR`), because they make up most sites.
+2. **Objects.** A finer grid over the grass, path and road zones looks for lamp posts and benches. A window only becomes an object when CLIP gives it at least 0.6 and twice the best surface score (`OBJECT_MIN`, `OBJECT_MARGIN`), so most lamp posts will need adding by hand.
+
+Notes:
 - The first run downloads the model weights from Hugging Face (about 600 MB) and caches them. Later runs work offline.
-- It runs on a laptop CPU, a few seconds per batch of 32 regions. No GPU or training needed.
-- It assigns only these kinds: building (roofs), grass, tree, path (sidewalks and footpaths), road, light (lamp posts) and bench. Each has a few text prompts in `PROMPTS` in the adapter ("an aerial photo of a lawn", ...). Edit that list to change the set.
-- Every region gets the closest of these kinds; nothing is left out. Low-confidence results are flagged for review.
-- Grass, path and road are treated as the base surfaces: they start 3 times more likely (`PRIOR` in the adapter), touching regions of the same base kind are joined into one block per photo with holes filled in, and they come first in the output so buildings, trees, lamp posts and benches sit on top of them (`BASE_KINDS` in `erfmap_worker.py`).
-- It is a general-purpose image model, not trained on drone surveys. Expect reasonable results on grass, water, roads, roofs and trees, and treat everything as a proposal.
-- `ERFMAP_CLIP_MODEL` and `ERFMAP_CLIP_PRETRAINED` choose another [OpenCLIP model](https://github.com/mlfoundations/open_clip), e.g. `ViT-L-14` / `laion2b_s32b_b82k` for better accuracy at about 3x the time.
+- On a laptop CPU it takes about 30 to 40 seconds per photo (or video keyframe). No GPU or training is needed.
+- Trees, lamp posts and benches become points in erfMap; grass, road and building stay areas; paths become lines with a width. Base surfaces come first in the output, so the rest sits on top (`BASE_KINDS` in `erfmap_worker.py`).
+- It is a general-purpose image model, not trained on drone surveys. Treat everything as a proposal and check it in Review.
+- `ERFMAP_ZONES=off` turns the zones pass off and falls back to colour clustering plus the region classifier (`adapters/clip_classifier.py`, same 7 kinds). `ERFMAP_CLIP_MODEL` and `ERFMAP_CLIP_PRETRAINED` choose another [OpenCLIP model](https://github.com/mlfoundations/open_clip).
 
 `worker/adapters/colour_heuristic_classifier.py` implements this contract with a colour heuristic. It exists only to test the boundary. It reports `"heuristic": true`, caps confidence at 0.5 and is labelled as not a trained model in the UI.
 

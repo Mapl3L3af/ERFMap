@@ -144,6 +144,22 @@ def classifier_command():
     return None
 
 
+def zones_command():
+    """ERFMAP_SEGMENTER if set, else the bundled CLIP zones + objects pass when open_clip is installed (ERFMAP_ZONES=off disables it)."""
+    configured = os.environ.get('ERFMAP_SEGMENTER', '').strip()
+    if configured:
+        return configured
+    if os.environ.get('ERFMAP_ZONES', '').strip().lower() in ('off', 'none', '0'):
+        return None
+    if os.environ.get('ERFMAP_CLASSIFIER', '').strip().lower() in ('off', 'none', '0'):
+        return None
+    import importlib.util
+    if importlib.util.find_spec('open_clip') and importlib.util.find_spec('torch'):
+        script = Path(__file__).resolve().parent / 'adapters' / 'clip_zones.py'
+        return subprocess.list2cmdline([sys.executable, str(script)]) if os.name == 'nt' else '"%s" "%s"' % (sys.executable, script)
+    return None
+
+
 def capabilities():
     ffmpeg, ffprobe = tool('ffmpeg'), tool('ffprobe')
     return {
@@ -154,7 +170,7 @@ def capabilities():
         'ffprobe_path': ffprobe,
         'numpy': np is not None,
         'opencv': cv2.__version__ if cv2 is not None else None,
-        'segmenter': os.environ.get('ERFMAP_SEGMENTER') or None,
+        'segmenter': zones_command(),
         'classifier': classifier_command(),
     }
 
@@ -876,15 +892,22 @@ def stage_regions(job):
     need_cv()
     out = stage_dir(job, 'regions')
     frames = keyframes(job)
-    segmenter = os.environ.get('ERFMAP_SEGMENTER')
-    method = 'external segmenter: ' + segmenter if segmenter else 'baseline colour clustering (OpenCV k-means). Not SAM 2.'
-    regions = []
+    segmenter = zones_command()
+    builtin = bool(segmenter) and 'clip_zones.py' in segmenter and not os.environ.get('ERFMAP_SEGMENTER')
+    method = ('CLIP zones and objects: a grid of windows labelled grass, path, road, building or tree, then a finer search for lamp posts and benches' if builtin
+              else 'external segmenter: ' + segmenter if segmenter else 'baseline colour clustering (OpenCV k-means). Not SAM 2.')
+    regions, model = [], None
     if segmenter:
-        progress(.1, 'Running external segmenter')
+        progress(.1, 'Labelling zones and objects with CLIP (a few seconds per photo)' if builtin else 'Running external segmenter')
         reply = external(segmenter, {'job': str(Path(job).resolve()), 'frames': [{'id': f['id'], 'image': str((Path(job) / f['after']).resolve())} for f in frames]}, 'Segmenter')
+        model = reply.get('model')
         for r in reply.get('regions', []):
             if r.get('frame') in {f['id'] for f in frames} and len(r.get('polygon', [])) >= 3:
-                regions.append({'frame': r['frame'], 'polygon': r['polygon'], 'area_px': polygon_area(r['polygon']), 'mean_rgb': r.get('mean_rgb'), 'score': r.get('score')})
+                region = {'frame': r['frame'], 'polygon': r['polygon'], 'area_px': polygon_area(r['polygon']), 'mean_rgb': r.get('mean_rgb'), 'score': r.get('score')}
+                for key in ('label', 'confidence', 'role'):
+                    if r.get(key) is not None:
+                        region[key] = r[key]
+                regions.append(region)
     else:
         for i, f in enumerate(frames):
             for r in baseline_regions(imread(Path(job) / f['after'])):
@@ -892,9 +915,9 @@ def stage_regions(job):
             progress((i + 1) / len(frames), 'Segmenting keyframe %d of %d' % (i + 1, len(frames)))
     for n, r in enumerate(regions):
         r['id'] = 'R%d' % (n + 1)
-    warnings = [] if segmenter else ['Regions come from colour clustering, which splits shadows and merges similar-looking surfaces. Configure ERFMAP_SEGMENTER for a learned segmenter such as SAM 2.']
+    warnings = [] if segmenter else ['Regions come from colour clustering, which splits shadows and merges similar-looking surfaces. Install the free CLIP model (pip install open_clip_torch) or configure ERFMAP_SEGMENTER.']
     return {'status': 'complete' if regions else 'needs_review', 'summary': '%d candidate regions in %d keyframes' % (len(regions), len(frames)),
-            'method': method, 'keyframes': [{'id': f['id'], 'image': f['after'], 'width': f['width'], 'height': f['height']} for f in frames], 'regions': regions, 'warnings': warnings}
+            'method': method, 'model': model, 'keyframes': [{'id': f['id'], 'image': f['after'], 'width': f['width'], 'height': f['height']} for f in frames], 'regions': regions, 'warnings': warnings}
 
 
 # ---------------------------------------------------------------- 5. classification
@@ -930,6 +953,21 @@ def stage_classification(job):
             cv2.imwrite(str(path), crop)
         payload.append({'id': r['id'], 'frame': r['frame'], 'crop': str(path.resolve()), 'polygon': r['polygon'], 'mean_rgb': r.get('mean_rgb'), 'area_px': r['area_px']})
         progress(.3 * (i + 1) / max(1, len(reg['regions'])), 'Preparing region crops')
+    if reg['regions'] and all(r.get('label') for r in reg['regions']):
+        # The segmenter already labelled every region (CLIP zones and objects): no separate classifier pass.
+        predictions = []
+        for r in reg['regions']:
+            kind = label_map.get(r['label'], r['label'])
+            conf = r.get('confidence')
+            conf = float(conf) if isinstance(conf, (int, float)) else None
+            kind = kind if kind in kinds else None
+            predictions.append({'id': r['id'], 'kind': kind, 'model_label': r['label'], 'confidence': conf, 'role': r.get('role'),
+                                'needs_review': kind is None or conf is None or conf < UNCERTAIN_BELOW})
+        uncertain = sum(p['needs_review'] for p in predictions)
+        objects = sum(1 for p in predictions if p.get('role') == 'object')
+        return {'status': 'needs_review' if uncertain else 'complete',
+                'summary': '%d zones and %d objects labelled during region detection, %d need review' % (len(predictions) - objects, objects, uncertain),
+                'model': reg.get('model'), 'predictions': predictions, 'uncertain_below': UNCERTAIN_BELOW, 'warnings': []}
     if not classifier:
         predictions = [{'id': r['id'], 'kind': None, 'model_label': None, 'confidence': None, 'needs_review': True} for r in reg['regions']]
         return {'status': 'unavailable', 'summary': 'No classifier configured. All %d regions are unlabelled and need review.' % len(predictions),
