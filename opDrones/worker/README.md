@@ -59,7 +59,9 @@ Then restart the server. The Classification stage picks it up by itself; the wor
 
 - The first run downloads the model weights from Hugging Face (about 600 MB) and caches them. Later runs work offline.
 - It runs on a laptop CPU, a few seconds per batch of 32 regions. No GPU or training needed.
-- Each erfMap kind that is visible from the air has a few text prompts in `PROMPTS` in the adapter ("an aerial photo of a lawn", ...). Edit them to suit your site. Small objects (bins, lights, signs) are left for the reviewer.
+- It only assigns these kinds: grass, water, road, path, tree, bush, building, light and bench. Each has a few text prompts in `PROMPTS` in the adapter ("an aerial photo of a lawn", ...); edit that list to change the set.
+- Regions that look like none of them (people, leaves, cars, dirt, shadows, ...) are **omitted**: they are left out of merging and the map, and show as grey dashed outlines on the Classification stage.
+- Grass and bushes are mapped only as **large blocks**. Touching regions of the same kind are joined, and blocks under 2% of the frame are omitted (`LARGE_ONLY` and `LARGE_MIN_FRACTION` in `erfmap_worker.py`).
 - It is a general-purpose image model, not trained on drone surveys. Expect reasonable results on grass, water, roads, roofs and trees, and treat everything as a proposal.
 - `ERFMAP_CLIP_MODEL` and `ERFMAP_CLIP_PRETRAINED` choose another [OpenCLIP model](https://github.com/mlfoundations/open_clip), e.g. `ViT-L-14` / `laion2b_s32b_b82k` for better accuracy at about 3x the time.
 

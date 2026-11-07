@@ -851,6 +851,11 @@ def stage_regions(job):
 
 
 # ---------------------------------------------------------------- 5. classification
+# Grass and bushes are only mapped as large blocks: smaller regions of those kinds are omitted.
+LARGE_ONLY = {'grass', 'bush'}
+LARGE_MIN_FRACTION = 0.02
+
+
 def stage_classification(job):
     need_cv()
     reg = stage_result(job, 'regions')
@@ -885,11 +890,46 @@ def stage_classification(job):
     progress(.4, 'Running classifier')
     reply = external(classifier, {'labels': labels['labels'], 'regions': payload}, 'Classifier')
     by_id = {p.get('id'): p for p in reply.get('predictions', [])}
-    predictions, unmapped = [], set()
+    def kind_of(r):
+        label = by_id.get(r['id'], {}).get('label') or by_id.get(r['id'], {}).get('kind')
+        return label, label_map.get(label, label)
+    # Grass and bushes count as large blocks: touching regions of the same kind in
+    # a frame are joined, and only blocks of at least LARGE_MIN_FRACTION are kept.
+    block_ok = {}
+    for fid, image in images.items():
+        h, w = image.shape[:2]
+        gap = max(3, int(0.01 * max(h, w)))
+        for big in LARGE_ONLY:
+            members = [r for r in reg['regions'] if r['frame'] == fid and kind_of(r)[1] == big]
+            if not members:
+                continue
+            mask = np.zeros((h, w), np.uint8)
+            for r in members:
+                cv2.fillPoly(mask, [np.array(r['polygon'], dtype=np.int32)], 255)
+            mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((gap, gap), np.uint8))
+            count, comp, stats, _ = cv2.connectedComponentsWithStats(mask)
+            for r in members:
+                x, y = np.array(r['polygon'], dtype=np.int32).mean(axis=0).astype(int)
+                inside = comp[min(max(y, 0), h - 1), min(max(x, 0), w - 1)]
+                if inside == 0:          # centroid outside its own polygon: use its largest overlap
+                    one = np.zeros((h, w), np.uint8)
+                    cv2.fillPoly(one, [np.array(r['polygon'], dtype=np.int32)], 1)
+                    ids, n = np.unique(comp[one > 0], return_counts=True)
+                    inside = ids[np.argmax(n * (ids > 0))] if len(ids) else 0
+                block_ok[r['id']] = inside > 0 and stats[inside, cv2.CC_STAT_AREA] >= LARGE_MIN_FRACTION * h * w
+    predictions, unmapped, omitted = [], set(), 0
     for r in reg['regions']:
         p = by_id.get(r['id'], {})
-        model_label = p.get('label') or p.get('kind')
-        kind = label_map.get(model_label, model_label)
+        model_label, kind = kind_of(r)
+        reason = None
+        if model_label == 'omit':
+            reason = 'not one of the mapped kinds'
+        elif kind in LARGE_ONLY and not block_ok.get(r['id'], False):
+            reason = '%s is only mapped in large blocks (at least %d%% of the frame)' % (kind, round(LARGE_MIN_FRACTION * 100))
+        if reason:
+            omitted += 1
+            predictions.append({'id': r['id'], 'kind': None, 'model_label': model_label, 'confidence': p.get('confidence'), 'needs_review': False, 'omit': True, 'omit_reason': reason})
+            continue
         if model_label is not None and kind not in kinds:
             unmapped.add(str(model_label))
             kind = None
@@ -903,11 +943,45 @@ def stage_classification(job):
     if reply.get('model', {}).get('heuristic'):
         warnings.append('The configured classifier reports itself as a heuristic, not a trained model.')
     uncertain = sum(p['needs_review'] for p in predictions)
-    return {'status': 'needs_review' if uncertain else 'complete', 'summary': '%d regions classified, %d need review' % (len(predictions), uncertain),
+    return {'status': 'needs_review' if uncertain else 'complete', 'summary': '%d regions classified, %d omitted, %d need review' % (len(predictions) - omitted, omitted, uncertain),
             'model': reply.get('model'), 'predictions': predictions, 'uncertain_below': UNCERTAIN_BELOW, 'warnings': warnings}
 
 
 # ---------------------------------------------------------------- 6. merging
+def join_blocks(merged, size, s):
+    """Join touching grass or bush features into one feature per block."""
+    out = [m for m in merged if m['kind'] not in LARGE_ONLY]
+    gap = max(3, int(0.01 * max(size)))
+    for big in sorted(LARGE_ONLY):
+        group = [m for m in merged if m['kind'] == big]
+        if len(group) < 2:
+            out += group
+            continue
+        mask = np.zeros((size[1], size[0]), np.uint8)
+        for m in group:
+            cv2.fillPoly(mask, [np.round(np.array(m['polygon']) * s).astype(np.int32)], 255)
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, np.ones((gap, gap), np.uint8))
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        for contour in contours:
+            approx = cv2.approxPolyDP(contour, 0.006 * cv2.arcLength(contour, True), True).reshape(-1, 2)
+            if len(approx) < 3:
+                continue
+            inside = [m for m in group if cv2.pointPolygonTest(contour, tuple(float(v) * s for v in np.array(m['polygon']).mean(axis=0)), False) >= 0]
+            if not inside:
+                continue
+            if len(inside) == 1:
+                out.append(inside[0])
+                continue
+            confs = [m['confidence'] for m in inside if m['confidence'] is not None]
+            flags = sorted({f for m in inside for f in m['flags']} - {'seen in one frame only'})
+            out.append({'id': inside[0]['id'], 'polygon': (approx / s).round(1).tolist(), 'kind': big,
+                        'confidence': round(float(np.mean(confs)), 3) if confs else None,
+                        'members': [r for m in inside for r in m['members']], 'frames': sorted({f for m in inside for f in m['frames']}),
+                        'mean_iou': None, 'flags': flags + ['joined from %d touching %s features' % (len(inside), big)],
+                        'member_polygons': [mp for m in inside for mp in m['member_polygons']]})
+    return out
+
+
 def stage_merging(job):
     need_cv()
     corr = stage_result(job, 'correction')
@@ -918,12 +992,15 @@ def stage_merging(job):
     W, H = corr['mosaic']['width'], corr['mosaic']['height']
     s = min(1.0, 900 / max(W, H))          # masks at reduced resolution
     size = (int(W * s) + 1, int(H * s) + 1)
-    items = []
+    items, omitted = [], 0
     for r in reg['regions']:
         poly = apply_h(to_mosaic[r['frame']], r['polygon'])
         mask = np.zeros((size[1], size[0]), np.uint8)
         cv2.fillPoly(mask, [np.round(poly * s).astype(np.int32)], 1)
         if mask.sum() < 4:
+            continue
+        if preds.get(r['id'], {}).get('omit'):
+            omitted += 1
             continue
         items.append({'region': r, 'poly': poly, 'mask': mask.astype(bool), 'pred': preds.get(r['id'], {})})
     items.sort(key=lambda it: -it['mask'].sum())
@@ -981,8 +1058,9 @@ def stage_merging(job):
                        'members': [m['region']['id'] for m in c['members']], 'frames': sorted({m['region']['frame'] for m in c['members']}),
                        'mean_iou': round(float(np.mean(c['ious'])), 3) if c['ious'] else None, 'flags': flags,
                        'member_polygons': [{'region': m['region']['id'], 'frame': m['region']['frame'], 'polygon': m['poly'].round(1).tolist()} for m in c['members']]})
+    merged = join_blocks(merged, size, s)
     conflicts = sum(1 for m in merged if any(f.startswith('conflicting') or f.startswith('geometry') for f in m['flags']))
-    return {'status': 'needs_review' if conflicts else 'complete', 'summary': '%d regions merged into %d features, %d with conflicts' % (len(items), len(merged), conflicts),
+    return {'status': 'needs_review' if conflicts else 'complete', 'summary': '%d regions merged into %d features, %d with conflicts' % (len(items), len(merged), conflicts) + (', %d omitted by the classifier' % omitted if omitted else ''),
             'mosaic': corr['mosaic'], 'merged': merged, 'warnings': []}
 
 

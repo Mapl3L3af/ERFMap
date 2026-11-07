@@ -380,13 +380,14 @@ async function keyframeView(body, regions, predictions, intro) {
         for (const r of byFrame(frame.id)) {
             const p = preds[r.id];
             if (!predictions) { s += '<polygon points="' + pts(r.polygon) + '" fill="#ffffff" fill-opacity=".12" stroke="#ffffff" stroke-width="1.5" vector-effect="non-scaling-stroke"><title>' + r.id + '</title></polygon>'; continue; }
+            if (p?.omit) { s += '<polygon points="' + pts(r.polygon) + '" fill="none" stroke="#9a9a9a" stroke-width="1" stroke-dasharray="2 3" vector-effect="non-scaling-stroke"><title>' + r.id + ' · omitted: ' + esc(p.omit_reason || '') + '</title></polygon>'; used.add('omit'); continue; }
             const l = label(p?.kind); used.add(p?.kind || '');
             s += '<polygon points="' + pts(r.polygon) + '" fill="' + l.color + '" fill-opacity=".38" stroke="' + (p?.needs_review ? '#e0705f' : l.color) + '" stroke-width="2" ' + (p?.needs_review ? 'stroke-dasharray="6 4" ' : '') + 'vector-effect="non-scaling-stroke"><title>' + r.id + ' · ' + esc(l.label) + (p?.confidence != null ? ' · ' + pct(p.confidence) : '') + '</title></polygon>';
             const c = S.centroid(r.polygon);
             s += '<text x="' + c[0] + '" y="' + c[1] + '" font-size="' + 11 * k + '" text-anchor="middle" fill="#fff" stroke="#000" stroke-width="' + 3 * k + '" paint-order="stroke">' + esc(p?.kind ? l.label + ' ' + pct(p.confidence) : '?') + '</text>';
         }
         v.draw(s);
-        if (predictions && document.getElementById('klegend')) document.getElementById('klegend').innerHTML = [...used].map(kd => '<span><i style="background:' + label(kd || null).color + '"></i>' + esc(kd ? label(kd).label : 'Unlabelled') + '</span>').join('') + '<span><i style="border:2px dashed #e0705f"></i>needs review (confidence below ' + pct(results.classification?.uncertain_below) + ' or no label)</span>';
+        if (predictions && document.getElementById('klegend')) document.getElementById('klegend').innerHTML = [...used].map(kd => kd === 'omit' ? '<span><i style="border:1px dashed #9a9a9a"></i>Omitted (not mapped)</span>' : '<span><i style="background:' + label(kd || null).color + '"></i>' + esc(kd ? label(kd).label : 'Unlabelled') + '</span>').join('') + '<span><i style="border:2px dashed #e0705f"></i>needs review (confidence below ' + pct(results.classification?.uncertain_below) + ' or no label)</span>';
     };
     v.redraw = draw;
     document.getElementById('kf').onchange = e => { frame = regions.keyframes.find(k => k.id === e.target.value); v.setImage(fileUrl(frame.image), frame.width, frame.height); v.fit(); };

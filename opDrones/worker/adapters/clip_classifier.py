@@ -24,24 +24,23 @@ import json
 import os
 import sys
 
-# Prompts per erfMap kind. Kinds not listed here (bins, lights, signs, ...) are
-# too small to recognise from a region crop and are left for the reviewer.
+# The only erfMap kinds this classifier assigns. Edit this to change the set.
 PROMPTS = {
     'grass': ['a lawn', 'mowed grass', 'a grassy field'],
-    'shrub': ['shrubs', 'low bushes in a garden bed'],
-    'bush': ['a bush', 'hedges'],
-    'soil': ['bare dirt', 'bare soil', 'mulch'],
-    'water': ['a pond', 'water', 'a lake'],
-    'pavement': ['a concrete sidewalk', 'a paved plaza', 'paving stones'],
-    'road': ['an asphalt road', 'a parking lot', 'a street'],
+    'water': ['a lake', 'a pond', 'water'],
+    'road': ['an asphalt road', 'a parking lot', 'an asphalt driveway'],
+    'path': ['a concrete sidewalk', 'a footpath', 'a paved walkway'],
+    'tree': ['a tree', 'a tree crown', 'bare tree branches'],
+    'bush': ['bushes', 'shrubs', 'a hedge'],
     'building': ['a building roof', 'a rooftop', 'a house roof'],
-    'canopy': ['tree canopy', 'a group of trees'],
-    'tree': ['a single tree', 'a tree crown'],
-    'path': ['a footpath', 'a gravel path', 'a walking trail'],
-    'solar': ['solar panels'],
-    'greenroof': ['a green roof covered in plants'],
-    'fountain': ['a fountain'],
+    'light': ['a lamp post', 'a street light seen from above'],
+    'bench': ['a park bench', 'a bench'],
 }
+# Things that are none of the above. A region that matches these best is
+# omitted from the map instead of being forced into a kind.
+OMIT = 'omit'
+OTHER = ['a person', 'fallen leaves', 'a car', 'bare dirt', 'a shadow', 'a rock', 'a manhole cover',
+         'a white sign on the ground', 'a window', 'a wall']
 TEMPLATES = ['an aerial photo of {}.', 'a top-down drone photo of {}.']
 MIN_SIDE = 12       # px; smaller crops carry too little to classify
 
@@ -55,6 +54,8 @@ def main():
 
     available = {l['kind'] for l in request['labels']}
     kinds = [k for k in PROMPTS if k in available]
+    prompts = {**{k: PROMPTS[k] for k in kinds}, OMIT: OTHER}
+    classes = list(prompts)
     name = os.environ.get('ERFMAP_CLIP_MODEL', 'ViT-B-32')
     weights = os.environ.get('ERFMAP_CLIP_PRETRAINED', 'laion2b_s34b_b79k')
     print('Loading CLIP %s (%s)' % (name, weights), file=sys.stderr)
@@ -68,8 +69,8 @@ def main():
 
     # One averaged text embedding per kind.
     text = []
-    for kind in kinds:
-        phrases = [t.format(p) for p in PROMPTS[kind] for t in TEMPLATES]
+    for kind in classes:
+        phrases = [t.format(p) for p in prompts[kind] for t in TEMPLATES]
         e = model.encode_text(tokenizer(phrases))
         e = e / e.norm(dim=-1, keepdim=True)
         e = e.mean(dim=0)
@@ -86,8 +87,8 @@ def main():
         probs = (100.0 * e @ text.T).softmax(dim=-1)
         for rid, p in zip(ids, probs):
             i = int(p.argmax())
-            predictions.append({'id': rid, 'label': kinds[i], 'confidence': round(float(p[i]), 3),
-                                'scores': {k: round(float(v), 3) for k, v in zip(kinds, p) if v >= 0.05}})
+            predictions.append({'id': rid, 'label': classes[i], 'confidence': round(float(p[i]), 3),
+                                'scores': {k: round(float(v), 3) for k, v in zip(classes, p) if v >= 0.05}})
         batch.clear()
         ids.clear()
 
