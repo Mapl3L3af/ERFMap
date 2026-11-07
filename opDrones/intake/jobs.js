@@ -313,11 +313,13 @@ function createIntake({directory, createProject, readBody}) {
             if (job.stages.geometry.status === 'processing') throw failure(409, 'Map geometry is being built. Try again in a moment.');
             job.calibration = {markerSideM: side,
                 markers: input.markers.map(m => ({id: m.id.slice(0, 20), corners: m.corners, confirmed: m.confirmed === true, manual: m.manual === true, flags: Array.isArray(m.flags) ? m.flags.map(String) : [], frames: m.frames})),
-                references: references.map(r => ({id: r.id.slice(0, 20), a: r.a, b: r.b, metres: r.metres, label: String(r.label || '').slice(0, 80), confirmed: r.confirmed !== false}))};
+                references: references.map(r => ({id: r.id.slice(0, 20), a: r.a, b: r.b, metres: r.metres, label: String(r.label || '').slice(0, 80), confirmed: r.confirmed !== false, ...(typeof r.frame === 'string' ? {frame: r.frame.slice(0, 20)} : {})}))};
             const confirmed = job.calibration.markers.filter(m => m.confirmed).length + job.calibration.references.filter(r => r.confirmed).length;
             if (passable(STAGES.find(s => s.id === 'markers'), job.stages.markers)) {
                 Object.assign(job.stages.markers, confirmed
-                    ? {status: 'complete', summary: confirmed + ' scale reference(s) confirmed: ' + job.calibration.markers.filter(m => m.confirmed).length + ' marker(s), ' + job.calibration.references.length + ' measured distance(s)'}
+                    ? {status: 'complete', summary: job.calibration.references.some(r => r.frame)
+                        ? new Set(job.calibration.references.filter(r => r.frame).map(r => r.frame)).size + ' photo(s) calibrated with a measured distance'
+                        : confirmed + ' scale reference(s) confirmed: ' + job.calibration.markers.filter(m => m.confirmed).length + ' marker(s), ' + job.calibration.references.length + ' measured distance(s)'}
                     : {status: 'needs_review', summary: 'Nothing confirmed. Confirm a marker or add a measured distance to scale the map.'});
             }
             if (passable(STAGES.find(s => s.id === 'merging'), job.stages.merging)) reset(job, 'geometry');

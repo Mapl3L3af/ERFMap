@@ -72,3 +72,26 @@ test('GLB has a valid header, JSON chunk and flat-elevation labelling', () => {
     assert.strictEqual(summary.contours.available, false);
     assert.strictEqual(summary.features[0].heightSource, 'reviewer estimate, not measured');
 });
+
+test('per-photo calibration travels with each feature into the scenario', () => {
+    const cal = id => ({id, metres: 1.524, label: 'sidewalk width', segment_px: 150, m_per_px: 0.01016, distance_from_reference_m: 3.2, flags: []});
+    const perImage = {
+        scale: {mode: 'per-image', m_per_px: 0.01, origin_px: [0, 0], references: 2,
+            images: [{frame: 'f0001', source: 'IMG_1.jpg', reference: 'D1', metres: 1.524, label: 'sidewalk width', segment_px: 150, m_per_px: 0.01016, flags: []},
+                {frame: 'f0002', source: 'IMG_2.jpg', reference: 'D2', metres: 3, label: 'tape', segment_px: 200, m_per_px: 0.015, flags: ['reference end near the photo edge, where lens distortion is strongest']}]},
+        features: [
+            {id: 'G1', kind: 'grass', predicted_kind: 'grass', geometry: 'area', p: square, region: square, confidence: 0.7, frames: ['f0001'], flags: [], image: {frame: 'f0001', source: 'IMG_1.jpg'}, calibration: cal('D1')},
+            {id: 'G2', kind: 'path', predicted_kind: 'path', geometry: 'line', p: [[30, 5], [36, 13]], region: square, confidence: 0.7, frames: ['f0002'], flags: [], width_m: 1.5, image: {frame: 'f0002', source: 'IMG_2.jpg'}, calibration: cal('D2')},
+        ],
+    };
+    const features = S.reviewedFeatures(perImage, {G1: {status: 'accepted'}, G2: {status: 'accepted'}}, labels);
+    assert.deepStrictEqual(features[0].size, {area_m2: 80});
+    assert.deepStrictEqual(features[1].size, {length_m: 10});
+    const site = restore(S.buildSite({job: {...job, original: {name: 'IMG_1.jpg'}}, geometry: perImage, features, labels}));
+    assert.strictEqual(site.features[0].intake.sourceImage, 'IMG_1.jpg');
+    assert.strictEqual(site.features[0].intake.calibration.id, 'D1');
+    assert.strictEqual(site.features[1].intake.calibration.id, 'D2');
+    assert.deepStrictEqual(site.features[1].intake.approximateSize, {length_m: 10});
+    assert.strictEqual(site.localScale.images.length, 2);
+    assert.match(site.localScale.limits, /Approximate/);
+});

@@ -26,7 +26,7 @@ const pct = v => v == null ? '—' : Math.round(v * 100) + '%';
 async function home() {
     document.getElementById('newJob').hidden = true;
     app.innerHTML = '<div class="home"><section class="card"><small class="cap">Step 1 · Intake</small><h2>Upload drone video or photos</h2>'
-        + '<p>Upload one video, or one or more photos. Shoot as straight down as you can, with plenty of overlap (about 60% between neighbouring photos). For scale, include something you measured on the ground: a tape measure laid out flat, two cones a known distance apart, or square boards of known size. GPS is not needed and not used.</p>'
+        + '<p>Upload one video, or one or more photos. Shoot as straight down as you can. Photos are calibrated one at a time: each needs something you measured on the ground in view (a sidewalk width, a tape measure laid flat, two cones a known distance apart). GPS is not needed and not used.</p>'
         + '<div class="drop" id="drop"><p><b>Drop a video or photos here</b> or</p><label class="button primary">Choose files<input type="file" id="video" multiple accept="video/*,image/*,.mp4,.mov,.mkv,.avi,.webm,.mts,.jpg,.jpeg,.png,.tif,.tiff,.webp" hidden></label><p class="cap" id="uploadName"></p><div class="bar" id="uploadBar" hidden><i style="width:0"></i></div></div>'
         + '<p id="uploadStatus" role="status"></p>'
         + '<div class="note warn">The result is a <b>locally scaled, unreferenced</b> map: metres from an arbitrary origin, with no north and no world coordinates. Perspective, terrain, camera tilt and blur can still distort it. It is not survey-grade.</div></section>'
@@ -228,10 +228,10 @@ function viewFrames(body, data) {
 function viewCorrection(body, data) {
     let current = data.frames[0];
     const okLinks = data.links.filter(l => l.ok).length;
-    body.innerHTML = '<table class="kv"><tr><td>Cleanup</td><td>' + esc(data.cleanup) + ' <span class="flag good">applied</span></td></tr><tr><td>Lens correction</td><td>' + esc(data.lens.reason) + ' <span class="flag ' + (data.lens.status === 'applied' ? 'good' : 'bad') + '">' + data.lens.status + '</span></td></tr><tr><td>Alignment</td><td>' + okLinks + ' of ' + data.links.length + ' frame pairs matched (ORB features + RANSAC homography); reference frame ' + data.reference + '</td></tr></table>'
+    body.innerHTML = '<table class="kv"><tr><td>Cleanup</td><td>' + esc(data.cleanup) + ' <span class="flag good">applied</span></td></tr><tr><td>Lens correction</td><td>' + esc(data.lens.reason) + ' <span class="flag ' + (data.lens.status === 'applied' ? 'good' : 'bad') + '">' + data.lens.status + '</span></td></tr><tr><td>Alignment</td><td>' + (data.layout === 'sheet' ? 'None: photos are calibrated one by one, so they are laid out side by side instead of stitched.' : okLinks + ' of ' + data.links.length + ' frame pairs matched (ORB features + RANSAC homography); reference frame ' + data.reference) + '</td></tr></table>'
         + '<h3>Before and after cleanup</h3><div class="row" id="strip" style="overflow-x:auto;flex-wrap:nowrap;padding-bottom:6px">' + data.frames.map(f => '<button type="button" class="thumb" style="flex:0 0 110px" data-cframe="' + f.id + '"><img loading="lazy" src="' + fileUrl(f.after) + '" alt=""><div>' + f.id + (f.to_mosaic ? '' : ' <span class="flag bad">unaligned</span>') + '</div></button>').join('') + '</div><div class="compare" id="compare"></div>'
-        + '<h3>Alignment preview</h3><p>Aligned frames stitched onto the reference frame with planar homographies. This is a preview for checking overlap, not an orthomosaic.</p><div id="mosaic"></div>'
-        + '<details><summary>Frame-pair matches</summary><table><tr><th>From</th><th>To</th><th>Inliers</th><th></th></tr>' + data.links.map(l => '<tr><td>' + l.from + '</td><td>' + (l.to || 'no match') + '</td><td>' + l.inliers + '</td><td>' + (l.ok ? '<span class="flag good">aligned</span>' : '<span class="flag bad">weak match</span>') + '</td></tr>').join('') + '</table></details>';
+        + (data.layout === 'sheet' ? '<h3>Photo sheet</h3><p>Each photo keeps its own pixels. Their positions relative to each other are not known.</p>' : '<h3>Alignment preview</h3><p>Aligned frames stitched onto the reference frame with planar homographies. This is a preview for checking overlap, not an orthomosaic.</p>') + '<div id="mosaic"></div>'
+        + (data.layout === 'sheet' ? '' : '<details><summary>Frame-pair matches</summary><table><tr><th>From</th><th>To</th><th>Inliers</th><th></th></tr>' + data.links.map(l => '<tr><td>' + l.from + '</td><td>' + (l.to || 'no match') + '</td><td>' + l.inliers + '</td><td>' + (l.ok ? '<span class="flag good">aligned</span>' : '<span class="flag bad">weak match</span>') + '</td></tr>').join('') + '</table></details>');
     const compare = () => {
         document.getElementById('compare').innerHTML = '<figure><img src="' + fileUrl(current.before) + '" alt="Before"><figcaption>Before · extracted frame ' + current.id + '</figcaption></figure><figure><img src="' + fileUrl(current.after) + '" alt="After"><figcaption>After · cleanup' + (data.lens.status === 'applied' ? ' and lens correction' : ' (lens correction unavailable)') + '</figcaption></figure>';
         document.querySelectorAll('[data-cframe]').forEach(b => b.setAttribute('aria-pressed', b.dataset.cframe === current.id));
@@ -246,7 +246,115 @@ const UNITS = {ft: 0.3048, in: 0.0254, m: 1, cm: 0.01};
 const markerSide = m => { const c = m.corners; return [0, 1, 2, 3].reduce((s, i) => s + Math.hypot(c[i][0] - c[(i + 1) % 4][0], c[i][1] - c[(i + 1) % 4][1]), 0) / 4; };
 const refLength = r => Math.hypot(r.a[0] - r.b[0], r.a[1] - r.b[1]);
 const fmtLength = m => m >= 1 ? m.toFixed(2) + ' m (' + (m / 0.3048).toFixed(1) + ' ft)' : (m * 100).toFixed(1) + ' cm (' + (m / 0.0254).toFixed(1) + ' in)';
+// Photos: one measured distance per photo, each photo scaled on its own.
+function calibrationChecks(r, tile) {
+    const [x0, y0, w, h] = tile, out = [], inside = q => q[0] >= x0 && q[0] <= x0 + w && q[1] >= y0 && q[1] <= y0 + h;
+    if (!inside(r.a) || !inside(r.b)) out.push('reference segment leaves the photo');
+    if (refLength(r) < 0.1 * Math.max(w, h)) out.push('reference segment is short (under 10% of the photo), so a small click error changes the scale a lot');
+    const m = 0.05 * Math.max(w, h);
+    if ([r.a, r.b].some(q => q[0] - x0 < m || x0 + w - q[0] < m || q[1] - y0 < m || y0 + h - q[1] < m)) out.push('reference end near the photo edge, where lens distortion is strongest');
+    return out;
+}
+async function viewPerImage(body, data) {
+    const images = data.images || [];
+    const refs = JSON.parse(JSON.stringify((job.calibration?.references || []).filter(r => r.frame)));
+    const geometry = job.stages.geometry.status === 'needs_review' || job.stages.geometry.status === 'complete' ? await stageData('geometry').catch(() => null) : null;
+    const checked = Object.fromEntries((geometry?.scale?.images || []).map(i => [i.frame, i]));
+    let active = images[0]?.frame || null, measuring = null, pending = null, dirty = false;
+    const name = i => i.source || i.frame;
+    body.innerHTML = '<div class="note">Each photo is calibrated <b>on its own</b>: pick a photo, click the two ends of something you measured on the ground (sidewalk width, a tape measure, two cones), and enter the distance. That photo’s features are sized from that distance only; no scale is shared between photos.'
+        + '<br>A single distance sets the scale <b>near the measured segment</b>. Perspective, camera tilt, terrain and lens distortion make sizes elsewhere in the photo approximate. Results are <b>locally scaled, unreferenced</b>: no geographic coordinates and no heights.</div>'
+        + '<div class="split"><div id="mviewer"></div><div>'
+        + '<div id="refForm" hidden class="card" style="margin-bottom:8px;padding:10px"><b id="refFor"></b><label>Distance between A and B <div class="row"><input id="refValue" type="number" min="0" step="any" style="width:110px"><select id="refUnit"><option value="ft">ft</option><option value="m">m</option><option value="in">in</option><option value="cm">cm</option></select></div></label><label>What is it? <input id="refLabel" placeholder="e.g. sidewalk width, tape measure" style="width:100%"></label><div class="row" style="margin-top:6px"><button type="button" class="primary" id="refAdd">Use this distance</button><button type="button" id="refCancel">Cancel</button></div></div>'
+        + '<div class="row"><button type="button" class="primary" id="saveMarkers">Save calibration</button></div><p id="mstatus" class="cap"></p><div class="list" id="mlist"></div></div></div>';
+    const v = viewer = createViewer(document.getElementById('mviewer'), {image: fileUrl(data.mosaic.image), width: data.mosaic.width, height: data.mosaic.height, hint: 'Zoom in before clicking. Drag the white handles to adjust a segment.'});
+    const text = (x, y, t, k, anchor = 'start') => '<text x="' + x + '" y="' + y + '" font-size="' + 13 * k + '" text-anchor="' + anchor + '" fill="#fff" stroke="#000" stroke-width="' + 3 * k + '" paint-order="stroke">' + esc(t) + '</text>';
+    const draw = () => {
+        const k = v.scale;
+        let s = '';
+        for (const i of images) {
+            const [x, y, w, h] = i.tile, r = refs.find(q => q.frame === i.frame), on = i.frame === active;
+            s += '<rect data-tile="' + i.frame + '" x="' + x + '" y="' + y + '" width="' + w + '" height="' + h + '" fill="none" stroke="' + (on ? '#c2e69e' : r ? '#8ec26a' : '#e8b04f') + '" stroke-width="' + (on ? 3 : 1.5) + '" vector-effect="non-scaling-stroke"/>';
+            s += text(x + 8 * k, y + 20 * k, name(i) + (r ? ' · ' + fmtLength(r.metres) : ' · not calibrated'), k);
+        }
+        for (const r of [...refs, ...(pending ? [pending] : [])]) {
+            const on = r.frame === active;
+            s += '<line x1="' + r.a[0] + '" y1="' + r.a[1] + '" x2="' + r.b[0] + '" y2="' + r.b[1] + '" stroke="#6fb3e0" stroke-width="' + (on ? 3 : 2) + '" vector-effect="non-scaling-stroke"/>';
+            s += text((r.a[0] + r.b[0]) / 2, (r.a[1] + r.b[1]) / 2 - 8 * k, r === pending ? 'A–B' : fmtLength(r.metres), k, 'middle');
+            if (on && r !== pending) ['a', 'b'].forEach(end => s += '<circle data-handle="r:' + r.frame + ':' + end + '" cx="' + r[end][0] + '" cy="' + r[end][1] + '" r="' + 6 * k + '" fill="#fff" stroke="#155d76" stroke-width="2" vector-effect="non-scaling-stroke" style="cursor:move"/>');
+        }
+        for (const p of measuring?.points || []) s += '<circle cx="' + p[0] + '" cy="' + p[1] + '" r="' + 4 * k + '" fill="#c2e69e"/>';
+        v.draw(s);
+    };
+    v.redraw = draw;
+    const list = () => {
+        document.getElementById('mlist').innerHTML = images.map(i => {
+            const r = refs.find(q => q.frame === i.frame), c = checked[i.frame];
+            const same = r && c && c.reference === r.id && c.a?.[0] === r.a[0] && c.a?.[1] === r.a[1] && c.b?.[0] === r.b[0] && c.b?.[1] === r.b[1] && c.metres === r.metres;
+            const issues = r ? [...new Set([...calibrationChecks(r, i.tile), ...(same ? c.flags : [])])] : [];
+            return '<div data-pick="' + i.frame + '" aria-selected="' + (i.frame === active) + '"><b>' + esc(name(i)) + '</b> ' + (r ? '<span class="flag good">' + esc(fmtLength(r.metres)) + '</span>' : '<span class="flag">not calibrated</span>')
+                + (r ? '<br><span class="cap">' + (r.label ? esc(r.label) + ' · ' : '') + refLength(r).toFixed(0) + ' px · ≈ ' + (r.metres / refLength(r) * 100).toFixed(2) + ' cm per pixel in this photo</span>' : '')
+                + (issues.length ? '<br>' + flags(issues, ['short', 'leaves', 'edge', 'featureless', 'blurry', 'tilted']) : '') + (i.flags?.length ? '<br><span class="cap">Photo: ' + esc(i.flags.join(', ')) + '</span>' : '')
+                + '<div class="row" style="margin-top:6px"><button type="button" data-measure="' + i.frame + '">' + (r ? 'Redo points' : 'Calibrate this photo') + '</button>' + (r ? '<button type="button" data-editref="' + i.frame + '">Edit distance</button><button type="button" data-remove="' + i.frame + '">Remove</button>' : '') + '</div></div>';
+        }).join('');
+        const done = new Set(refs.map(r => r.frame)).size;
+        document.getElementById('mstatus').textContent = measuring ? 'Click point ' + (measuring.points.length ? 'B' : 'A') + ' inside ' + name(images.find(i => i.frame === measuring.frame)) + '.' : pending ? 'Enter the measured distance.' : (dirty ? 'Unsaved changes. ' : '') + done + ' of ' + images.length + ' photos calibrated.' + (done < images.length ? ' Uncalibrated photos are left out of the map.' : '');
+        draw();
+    };
+    const focusTile = frame => { const i = images.find(x => x.frame === frame); if (i) { const [x, y, w, h] = i.tile; v.focus(x, y, x + w, y + h, 1.05); } };
+    const openForm = (frame, r) => {
+        const f = document.getElementById('refForm'); f.hidden = false;
+        document.getElementById('refFor').textContent = name(images.find(i => i.frame === frame));
+        document.getElementById('refUnit').value = 'ft';
+        document.getElementById('refValue').value = r ? +(r.metres / 0.3048).toFixed(3) : '';
+        document.getElementById('refLabel').value = r?.label || '';
+        document.getElementById('refValue').focus();
+    };
+    v.onClick = (p, target) => {
+        if (measuring) {
+            const i = images.find(x => x.frame === measuring.frame), [x, y, w, h] = i.tile;
+            if (p[0] < x || p[0] > x + w || p[1] < y || p[1] > y + h) { document.getElementById('mstatus').textContent = 'That point is outside ' + name(i) + '. Both ends must be in the same photo.'; return; }
+            measuring.points.push(p);
+            if (measuring.points.length === 2) {
+                const old = refs.find(r => r.frame === measuring.frame);
+                pending = {frame: measuring.frame, a: measuring.points[0], b: measuring.points[1], metres: old?.metres, label: old?.label};
+                measuring = null; openForm(pending.frame, old);
+            }
+            list(); return;
+        }
+        const hit = target.closest?.('[data-tile]');
+        if (hit) { active = hit.dataset.tile; list(); }
+    };
+    v.onDrag = (handle, p) => { const [, frame, end] = handle.split(':'); const r = refs.find(x => x.frame === frame); if (r) { r[end] = p; dirty = true; draw(); } };
+    v.onDragEnd = () => list();
+    body.querySelector('#mlist').onclick = e => {
+        const m = e.target.closest('[data-measure]'), ed = e.target.closest('[data-editref]'), rm = e.target.closest('[data-remove]'), pick = e.target.closest('[data-pick]');
+        if (m) { active = m.dataset.measure; measuring = {frame: active, points: []}; pending = null; document.getElementById('refForm').hidden = true; focusTile(active); }
+        else if (ed) { active = ed.dataset.editref; const r = refs.find(x => x.frame === active); pending = {...r}; openForm(active, r); }
+        else if (rm) { refs.splice(refs.findIndex(x => x.frame === rm.dataset.remove), 1); dirty = true; }
+        else if (pick) { active = pick.dataset.pick; focusTile(active); }
+        list();
+    };
+    document.getElementById('refCancel').onclick = () => { pending = null; document.getElementById('refForm').hidden = true; list(); };
+    document.getElementById('refAdd').onclick = () => {
+        const metres = Number(document.getElementById('refValue').value) * UNITS[document.getElementById('refUnit').value];
+        if (!(metres > 0) || !pending) { document.getElementById('mstatus').textContent = 'Enter the measured distance.'; return; }
+        const n = images.findIndex(i => i.frame === pending.frame) + 1;
+        const r = {id: 'D' + n, frame: pending.frame, a: pending.a, b: pending.b, metres, label: document.getElementById('refLabel').value.trim(), confirmed: true};
+        const at = refs.findIndex(x => x.frame === r.frame);
+        if (at >= 0) refs[at] = r; else refs.push(r);
+        pending = null; dirty = true; document.getElementById('refForm').hidden = true;
+        list();
+    };
+    document.getElementById('saveMarkers').onclick = async () => {
+        const note = t => { const el = document.getElementById('mstatus'); if (el) el.textContent = t; };
+        try { await api('/api/intake/jobs/' + job.id + '/calibration', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({markers: [], references: refs, markerSideM: job.calibration?.markerSideM || 0.3048})}); dirty = false; delete results.geometry; note('Saved. Map geometry is being rebuilt.'); }
+        catch (e) { note(e.message); }
+    };
+    list();
+}
 async function viewMarkers(body, data) {
+    if (data.mode === 'per-image') return viewPerImage(body, data);
     const markers = JSON.parse(JSON.stringify(job.calibration?.markers || []));
     const references = JSON.parse(JSON.stringify(job.calibration?.references || []));
     let sideM = job.calibration?.markerSideM || 0.3048;
@@ -472,7 +580,10 @@ function viewGeometry(body, data) {
         return;
     }
     const sc = data.scale;
-    body.innerHTML = '<table class="kv"><tr><td>Scale</td><td>' + (sc.m_per_px * 100).toFixed(3) + ' cm per preview pixel, median of ' + sc.markers + ' marker(s) and ' + (sc.references || 0) + ' measured distance(s)' + (sc.spread != null ? '; references disagree by ' + (sc.spread * 100).toFixed(1) + '%' : '') + '</td></tr><tr><td>Extent</td><td>' + data.extent_m.map(v => v.toFixed(1)).join(' × ') + ' m (local)</td></tr><tr><td>Features</td><td>' + data.features.length + ' proposals: ' + ['area', 'line', 'point'].map(g => data.features.filter(f => f.geometry === g).length + ' ' + g + 's').join(', ') + '</td></tr></table><div id="geomap" style="margin-top:10px"></div>';
+    const scaleText = sc.mode === 'per-image'
+        ? 'Per photo, from one measured distance each:' + sc.images.map(i => '<br>' + esc(i.source || i.frame) + ': ' + esc(fmtLength(i.metres)) + (i.label ? ' (' + esc(i.label) + ')' : '') + ' over ' + i.segment_px.toFixed(0) + ' px ≈ ' + (i.m_per_px * 100).toFixed(2) + ' cm/px' + (i.flags.length ? ' ' + flags(i.flags, ['short', 'leaves', 'edge', 'featureless', 'blurry', 'tilted']) : '')).join('') + '<br><span class="cap">Photos are placed side by side below; the gaps between them mean nothing.</span>'
+        : (sc.m_per_px * 100).toFixed(3) + ' cm per preview pixel, median of ' + sc.markers + ' marker(s) and ' + (sc.references || 0) + ' measured distance(s)' + (sc.spread != null ? '; references disagree by ' + (sc.spread * 100).toFixed(1) + '%' : '');
+    body.innerHTML = '<table class="kv"><tr><td>Scale</td><td>' + scaleText + '</td></tr><tr><td>Extent</td><td>' + data.extent_m.map(v => v.toFixed(1)).join(' × ') + ' m (local)</td></tr><tr><td>Features</td><td>' + data.features.length + ' proposals: ' + ['area', 'line', 'point'].map(g => data.features.filter(f => f.geometry === g).length + ' ' + g + 's').join(', ') + '</td></tr></table><div id="geomap" style="margin-top:10px"></div>';
     const features = S.reviewedFeatures(data, {}, labels);
     viewer = mapView(document.getElementById('geomap'), data, () => features);
 }
@@ -485,7 +596,7 @@ async function viewReview(body, payload) {
     const kindOptions = kind => ['area', 'line', 'point'].map(g => '<optgroup label="' + g[0].toUpperCase() + g.slice(1) + 's">' + labels.filter(l => l.geometry === g).map(l => '<option value="' + l.kind + '"' + (l.kind === kind ? ' selected' : '') + '>' + esc(l.label) + ' (' + l.kind + ')</option>').join('') + '</optgroup>').join('');
     const features = () => S.reviewedFeatures(geometry, edits, labels);
     body.innerHTML = '<div class="note warn">Model and pipeline output are proposals. Only features you <b>accept</b> are imported. Dashed amber outlines are pending; solid outlines are accepted.</div><div id="rmap"></div>'
-        + '<div class="row" style="margin-top:10px"><button type="button" id="acceptLabelled">Accept all with a model label</button><span class="cap" id="rstatus"></span></div><div class="review-table"><table><thead><tr><th>ID</th><th>Label</th><th>Name</th><th>Height (m)</th><th>Model</th><th>Flags</th><th>Decision</th></tr></thead><tbody id="rows"></tbody></table></div>'
+        + '<div class="row" style="margin-top:10px"><button type="button" id="acceptLabelled">Accept all with a model label</button><span class="cap" id="rstatus"></span></div><div class="review-table"><table><thead><tr><th>ID</th><th>Label</th><th>Name</th><th>Approx. size</th><th>Height (m)</th><th>Model</th><th>Flags</th><th>Decision</th></tr></thead><tbody id="rows"></tbody></table></div>'
         + '<div class="export"><section class="card" id="exportScenario"></section><section class="card" id="export3d"></section></div>';
     const v = viewer = mapView(document.getElementById('rmap'), geometry, features, {editable: true, active: () => active, hint: 'Select a feature to edit it. Drag white handles to move vertices.'});
     let saving = Promise.resolve();
@@ -500,6 +611,7 @@ async function viewReview(body, payload) {
         document.getElementById('rows').innerHTML = features().map(f => '<tr data-row="' + f.id + '" aria-selected="' + (f.id === active) + '" class="' + f.status + '"><td><b>' + f.id + '</b></td>'
             + '<td><select data-edit="kind" data-id="' + f.id + '">' + kindOptions(f.kind) + '</select>' + (f.predictedKind ? '' : '<span class="cap">no model label</span>') + '</td>'
             + '<td><input data-edit="name" data-id="' + f.id + '" value="' + esc(f.name) + '"></td>'
+            + '<td>' + (f.size.area_m2 != null ? '≈ ' + f.size.area_m2 + ' m²' : f.size.length_m != null ? '≈ ' + f.size.length_m + ' m long' : '<span class="cap">point</span>') + (f.image ? '<br><span class="cap">' + esc(f.image.source || f.image.frame) + ' · scale ' + esc(f.calibration.id) + ' (' + esc(fmtLength(f.calibration.metres)) + ')</span>' : '') + '</td>'
             + '<td>' + (f.geometry === 'area' ? '<input data-edit="height" data-id="' + f.id + '" type="number" min="0" step="0.1" placeholder="estimate" value="' + (f.height ?? '') + '">' : '<span class="cap">—</span>') + '</td>'
             + '<td>' + (f.predictedKind ? esc(label(f.predictedKind).label) + ' · ' + pct(f.confidence) : '—') + '</td><td>' + flags(f.flags, ['conflict', 'label', 'geometry']) + (f.note ? '<br><span class="cap">' + esc(f.note) + '</span>' : '') + '</td>'
             + '<td><div class="row"><button type="button" data-status="accepted" data-id="' + f.id + '" class="' + (f.status === 'accepted' ? 'primary' : '') + '">Accept</button><button type="button" data-status="rejected" data-id="' + f.id + '"' + (f.status === 'rejected' ? ' style="border-color:#e0705f"' : '') + '>Reject</button></div></td></tr>').join('');
@@ -510,7 +622,7 @@ async function viewReview(body, payload) {
         const list = features(), accepted = list.filter(f => f.status === 'accepted');
         const pending = list.filter(f => f.status === 'proposed').length, rejected = list.filter(f => f.status === 'rejected').length;
         document.getElementById('exportScenario').innerHTML = '<small class="cap">Import into erfMap</small><h3>' + accepted.length + ' accepted · ' + pending + ' pending · ' + rejected + ' rejected</h3>'
-            + '<p>Accepted features become an erfMap scenario (<code>fieldform-site-v1</code>) in local metres, the format Open Project already reads. GeoJSON is not used because erfMap’s GeoJSON import needs real longitude and latitude, which this video does not have.</p><p class="cap">Each feature keeps its job, source frames, model label, confidence and review status under <code>intake</code>.</p>'
+            + '<p>Accepted features become an erfMap scenario (<code>fieldform-site-v1</code>) in local metres, the format Open Project already reads. GeoJSON is not used because erfMap’s GeoJSON import needs real longitude and latitude, which this imagery does not have.</p><p class="cap">Each feature keeps its job, source frames or photo, scale calibration, approximate size, model label, confidence and review status under <code>intake</code>.</p>'
             + '<div class="row"><button type="button" class="primary" id="importNow"' + (accepted.length ? '' : ' disabled') + '>Import into erfMap</button><a class="button" ' + (accepted.length ? 'href="/api/intake/jobs/' + job.id + '/scenario"' : 'aria-disabled="true" style="opacity:.45"') + '>Download scenario JSON</a></div>'
             + (payload.imports?.length ? '<h3>Imported</h3><ul>' + payload.imports.map(i => '<li><a href="/survey/?room=' + i.code + '">Project ' + i.code + '</a> · ' + i.features + ' features · ' + new Date(i.at).toLocaleString() + '</li>').join('') + '</ul>' : '');
         const panel = document.getElementById('export3d');
