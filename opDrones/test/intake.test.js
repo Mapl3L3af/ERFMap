@@ -55,6 +55,14 @@ test('ear clipping covers a concave polygon exactly', () => {
     assert.strictEqual(tri.reduce((s, t) => s + area(t), 0), 10);
 });
 
+test('ear clipping covers a lawn with a building hole (keyhole outline) exactly', () => {
+    // 10x10 lawn with a 4x4 hole, joined to the outline by a zero-width cut, as zones are exported.
+    const poly = [[0, 0], [3, 3], [7, 3], [7, 7], [3, 7], [3, 3], [0, 0], [0, 10], [10, 10], [10, 0]];
+    const tri = S.triangulate(poly);
+    const area = t => Math.abs((poly[t[1]][0] - poly[t[0]][0]) * (poly[t[2]][1] - poly[t[0]][1]) - (poly[t[2]][0] - poly[t[0]][0]) * (poly[t[1]][1] - poly[t[0]][1])) / 2;
+    assert.strictEqual(tri.reduce((s, t) => s + area(t), 0), 84);
+});
+
 test('GLB has a valid header, JSON chunk and flat-elevation labelling', () => {
     const features = S.reviewedFeatures(geometry, {G1: {kind: 'building', height: 6, status: 'accepted'}, G2: {status: 'accepted'}}, labels);
     const site = S.buildSite({job, geometry, features, labels});
