@@ -130,6 +130,20 @@ def tool(name):
     return None
 
 
+def classifier_command():
+    """ERFMAP_CLASSIFIER if set ('off' disables), else the bundled CLIP adapter when open_clip is installed."""
+    configured = os.environ.get('ERFMAP_CLASSIFIER', '').strip()
+    if configured.lower() in ('off', 'none', '0'):
+        return None
+    if configured:
+        return configured
+    import importlib.util
+    if importlib.util.find_spec('open_clip') and importlib.util.find_spec('torch'):
+        script = Path(__file__).resolve().parent / 'adapters' / 'clip_classifier.py'
+        return subprocess.list2cmdline([sys.executable, str(script)]) if os.name == 'nt' else '"%s" "%s"' % (sys.executable, script)
+    return None
+
+
 def capabilities():
     ffmpeg, ffprobe = tool('ffmpeg'), tool('ffprobe')
     return {
@@ -141,7 +155,7 @@ def capabilities():
         'numpy': np is not None,
         'opencv': cv2.__version__ if cv2 is not None else None,
         'segmenter': os.environ.get('ERFMAP_SEGMENTER') or None,
-        'classifier': os.environ.get('ERFMAP_CLASSIFIER') or None,
+        'classifier': classifier_command(),
     }
 
 
@@ -843,7 +857,7 @@ def stage_classification(job):
     labels = read_json(Path(job) / 'labels.json', {'labels': []})
     label_map = labels.get('map', {})
     kinds = {l['kind'] for l in labels['labels']}
-    classifier = os.environ.get('ERFMAP_CLASSIFIER')
+    classifier = classifier_command()
     out = stage_dir(job, 'classification')
     crops = out / 'crops'
     crops.mkdir(exist_ok=True)
@@ -866,7 +880,7 @@ def stage_classification(job):
     if not classifier:
         predictions = [{'id': r['id'], 'kind': None, 'model_label': None, 'confidence': None, 'needs_review': True} for r in reg['regions']]
         return {'status': 'unavailable', 'summary': 'No classifier configured. All %d regions are unlabelled and need review.' % len(predictions),
-                'reason': 'Set ERFMAP_CLASSIFIER to a command that implements the classifier contract in worker/README.md. Until then, label regions by hand in Review.',
+                'reason': 'Install the free CLIP classifier (pip install open_clip_torch) or set ERFMAP_CLASSIFIER to a command that implements the classifier contract in worker/README.md. Until then, label regions by hand in Review.',
                 'model': None, 'predictions': predictions, 'uncertain_below': UNCERTAIN_BELOW, 'warnings': []}
     progress(.4, 'Running classifier')
     reply = external(classifier, {'labels': labels['labels'], 'regions': payload}, 'Classifier')

@@ -396,7 +396,7 @@ function viewRegions(body, data) {
 }
 async function viewClassification(body, data) {
     const regions = await stageData('regions');
-    const model = data.model ? 'Model: <b>' + esc(data.model.name || 'unnamed') + '</b> ' + esc(data.model.version || '') + (data.model.heuristic ? ' <span class="flag bad">heuristic, not trained</span>' : '') : 'No classifier ran. Regions are shown as unlabelled proposals.';
+    const model = data.model ? 'Model: <b>' + esc(data.model.name || 'unnamed') + '</b> ' + esc(data.model.version || '') + (data.model.heuristic ? ' <span class="flag bad">heuristic, not trained</span>' : '') + (data.model.note ? '<br><span class="cap">' + esc(data.model.note) + '</span>' : '') : 'No classifier ran. Regions are shown as unlabelled proposals.';
     return keyframeView(body, regions, data.predictions, '<p>' + model + ' Colours follow erfMap feature kinds; predictions are proposals until accepted in Review.</p>');
 }
 

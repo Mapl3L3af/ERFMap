@@ -5,6 +5,7 @@
 Needs FFmpeg on PATH and the packages in worker/requirements.txt.
 """
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -33,7 +34,8 @@ class PipelineTest(unittest.TestCase):
         shutil.rmtree(cls.job, ignore_errors=True)
 
     def run_stage(self, stage):
-        out = subprocess.run([sys.executable, str(WORKER), 'run', stage, str(self.job)], capture_output=True, text=True, check=True)
+        env = {**os.environ, 'ERFMAP_CLASSIFIER': 'off'}   # keep the test offline even when the CLIP classifier is installed
+        out = subprocess.run([sys.executable, str(WORKER), 'run', stage, str(self.job)], capture_output=True, text=True, check=True, env=env)
         return json.loads(out.stdout.strip().splitlines()[-1])
 
     def test_pipeline(self):

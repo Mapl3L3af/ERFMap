@@ -26,7 +26,7 @@ Set these before starting the server; the worker inherits the server's environme
 | 2. Image correction | CLAHE contrast equalisation and light denoising, with before/after previews. ORB feature matching and RANSAC homographies chain each video frame to a middle reference frame. Photos can be in any order: every pair is compared (up to 40 photos), the best-connected photo is the reference, and each photo attaches to the aligned photo it matches best. Photos with under about 50% overlap with any other usually fail to align and are left out, with a warning. The result is a planar alignment preview. Lens correction runs only if `camera.json` (`fx`, `fy`, `cx`, `cy`, `dist`) is in the job folder. | Works. Lens correction is unavailable without calibration. The preview is not an orthomosaic. |
 | Scale calibration | **Measured distances:** the reviewer clicks two points they measured on the ground (tape measure ends, cones, a parking-space width) and enters the length in ft, in, m or cm. **Square boards** (any size, set in the UI, 1 ft by default) are detected at several thresholds, refined at half contrast with fitted edges, projected into the preview and grouped across frames. Each marker is flagged as blurry, too small (under 24 px), seen in too few frames (under 3) or possibly obscured. The reviewer confirms or corrects the corners, or places markers by hand. | Works. The scale comes only from the distances and corners the reviewer confirms. |
 | 3. Region detection | Baseline: k-means colour clustering on up to 10 keyframes, turned into polygons. Or `ERFMAP_SEGMENTER`. | Baseline works. It is not a learned model. |
-| 4. Classification | `ERFMAP_CLASSIFIER` only. Predictions below 0.6 confidence, or with no label, are marked for review. | **Unavailable.** Regions stay unlabelled, and the reviewer labels them. |
+| 4. Classification | The bundled CLIP zero-shot adapter (`adapters/clip_classifier.py`) runs automatically once `open_clip_torch` is installed, or any command set in `ERFMAP_CLASSIFIER`. Predictions below 0.6 confidence, or with no label, are marked for review. | **Unavailable** until one is installed. Regions stay unlabelled, and the reviewer labels them. |
 | 5. Cross-frame merging | Regions are warped into the preview, matched by IoU over 0.3 (one per frame) and merged by majority vote. Label conflicts, varying geometry and single-frame detections are flagged. | Works |
 | 6. Map geometry | Metres per preview pixel is the median over confirmed markers and measured distances, and disagreement between them is reported. Areas stay polygons, lines become the long axis of the region and points become centroids, following erfMap's `kinds` geometry. | Works once one scale reference is confirmed |
 | 7. Review & export | In the browser: relabel, rename, set an estimated height, move vertices, and accept or reject. Then import into erfMap, download the scenario JSON, or download a `.glb`. | Works |
@@ -48,6 +48,20 @@ Both adapters are shell commands. They receive JSON on stdin and must print JSON
 ```
 
 Labels are mapped to erfMap kinds through `intake/label-map.json`. A label that already matches a kind needs no entry. Unmapped labels become unknown and are flagged for review. To extend the label set, add kinds to `erfmap-survey/model.js` (the UI reads them from there) and map new model labels in `label-map.json`.
+
+### Free classifier: CLIP zero-shot
+
+```
+pip install open_clip_torch pillow
+```
+
+Then restart the server. The Classification stage picks it up by itself; the worker status on the intake home page shows it as the classifier. Set `ERFMAP_CLASSIFIER=off` to turn it off, or to any other command to use a different model.
+
+- The first run downloads the model weights from Hugging Face (about 600 MB) and caches them. Later runs work offline.
+- It runs on a laptop CPU, a few seconds per batch of 32 regions. No GPU or training needed.
+- Each erfMap kind that is visible from the air has a few text prompts in `PROMPTS` in the adapter ("an aerial photo of a lawn", ...). Edit them to suit your site. Small objects (bins, lights, signs) are left for the reviewer.
+- It is a general-purpose image model, not trained on drone surveys. Expect reasonable results on grass, water, roads, roofs and trees, and treat everything as a proposal.
+- `ERFMAP_CLIP_MODEL` and `ERFMAP_CLIP_PRETRAINED` choose another [OpenCLIP model](https://github.com/mlfoundations/open_clip), e.g. `ViT-L-14` / `laion2b_s32b_b82k` for better accuracy at about 3x the time.
 
 `worker/adapters/colour_heuristic_classifier.py` implements this contract with a colour heuristic. It exists only to test the boundary. It reports `"heuristic": true`, caps confidence at 0.5 and is labelled as not a trained model in the UI.
 
