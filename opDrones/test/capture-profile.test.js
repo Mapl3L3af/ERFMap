@@ -8,7 +8,7 @@ const {createIntake} = require('../intake/jobs');
 const {captureProfile} = require('../intake/capture-profile');
 const S = require('../erfmap-intake/shared');
 
-test('new uploads persist assumed 25 m or a supplied height, including after restart', async t => {
+test('new uploads have no fixed height; a supplied height persists, including after restart', async t => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'erf-height-'));
     t.after(() => fs.rmSync(directory, {recursive:true, force:true}));
     const options = {directory, createProject:()=>{}, readBody:async()=>({})};
@@ -22,8 +22,9 @@ test('new uploads persist assumed 25 m or a supplied height, including after res
         return result;
     };
     const assumed = await upload(''), supplied = await upload('&height_agl_m=24');
-    assert.equal(assumed.captureProfile.height_agl_m, 25);
-    assert.equal(assumed.captureProfile.height_source, 'assumed');
+    assert.equal(assumed.captureProfile.height_agl_m, null);
+    assert.equal(assumed.captureProfile.height_source, 'unknown');
+    assert.equal(assumed.captureProfile.height_mode, 'adaptive');
     assert.equal(supplied.captureProfile.height_agl_m, 24);
     assert.equal(supplied.captureProfile.height_source, 'user-supplied');
     await assert.rejects(upload('&height_agl_m=NaN'), {status:400});
@@ -38,8 +39,8 @@ test('height context travels through export without changing measured scale or t
     const geometry = {features:[], scale:{m_per_px:0.02, origin_px:[0,0]}, mosaic:{width:100,height:100}};
     const job = {id:'test',name:'test.jpg',original:{name:'test.jpg'},sceneMode:'stitched'};
     const legacy = S.buildSite({job,geometry,features:[],labels:[]});
-    const current = S.buildSite({job:{...job,captureProfile:captureProfile()},geometry,features:[],labels:[]});
-    assert.equal(current.localScale.captureProfile.height_agl_m,25);
+    const current = S.buildSite({job:{...job,captureProfile:captureProfile(24)},geometry,features:[],labels:[]});
+    assert.equal(current.localScale.captureProfile.height_agl_m,24);
     assert.equal(legacy.localScale.captureProfile,null);
     assert.equal(current.localScale.metresPerPixel,0.02);
     assert.equal(current.w,legacy.w);

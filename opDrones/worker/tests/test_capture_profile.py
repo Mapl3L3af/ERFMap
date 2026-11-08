@@ -17,12 +17,26 @@ class CaptureProfileTests(unittest.TestCase):
         self.assertFalse(any('25' in p for p in prompt_templates(profile)))
 
     def test_templates_follow_supplied_height(self):
-        self.assertTrue(any('25 metres' in p for p in prompt_templates(DEFAULT_PROFILE)))
+        self.assertIsNone(DEFAULT_PROFILE['height_agl_m'], 'no fixed capture height')
+        self.assertFalse(any('metres' in p for p in prompt_templates(DEFAULT_PROFILE)))
         profile = capture_profile({'height_agl_m': 24, 'height_source': 'user-supplied'})
         self.assertTrue(any('24 metres' in p for p in prompt_templates(profile)))
         for bad in (0, -1, float('nan'), float('inf'), True, '30'):
             with self.assertRaises(ValueError):
                 capture_profile({'height_agl_m': bad, 'height_source':'assumed'})
+
+    def test_prompts_adapt_to_each_flyovers_measured_detail(self):
+        with tempfile.TemporaryDirectory() as folder:
+            job = Path(folder)
+            def detail(metres, px):
+                (job/'job.json').write_text(json.dumps({'captureProfile': {'height_agl_m': 25, 'height_source': 'assumed'},
+                    'calibration': {'references': [{'a': [0, 0], 'b': [px, 0], 'metres': metres, 'confirmed': True}]}}))
+                return job_capture(job)
+            close, far = detail(1, 100), detail(10, 100)
+            self.assertIsNone(close['height_agl_m'], 'the retired 25 m assumption is dropped')
+            self.assertAlmostEqual(close['gsd_m'], .01)
+            self.assertIn('low-altitude', prompt_templates(close)[0])
+            self.assertIn('high-altitude', prompt_templates(capture_profile(far))[0], 'gsd survives the adapter round-trip')
 
     def test_job_context_reaches_initial_and_classification_adapters(self):
         import erfmap_worker as worker

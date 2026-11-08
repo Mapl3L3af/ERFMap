@@ -1,9 +1,9 @@
 {
-  "version": 1,
-  "height_agl_m": 25,
-  "height_source": "assumed",
+  "version": 2,
+  "height_agl_m": null,
+  "height_source": "unknown",
   "view": "overhead",
   "scale_source": "measured-ground-reference",
-  "note": "Nominal capture context; small height fluctuations are expected. Height is above local ground, not takeoff altitude, object height, map scale or terrain elevation.",
-  "height_mode": "nominal"
+  "height_mode": "adaptive",
+  "note": "No fixed capture height. Each flyover is described by its own measured ground detail (metres per pixel); a height is only used when the person supplies one for that flyover."
 }

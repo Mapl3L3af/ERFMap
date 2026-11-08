@@ -10,7 +10,7 @@ Edits to different features merge. For changes to the same feature, the last edi
 
 ## Video and photo intake (drone imagery without GPS)
 
-New flyovers assume **25 metres above local ground**, with overhead imagery. Upload accepts another height when known and saves whether the height was assumed or supplied. Capture context follows detection, review and export; it never replaces measured scale or supplies terrain elevation. Older jobs retain unknown capture height. See `capture-profile.json` for the default profile.
+There is no fixed capture height. Each flyover is described by the ground detail measured from its own photos or frames (metres per pixel after calibration), so any overhead imagery is accepted. A height is recorded only when supplied for that flyover. Capture context follows detection, review and export; it never replaces measured scale or supplies terrain elevation. Older jobs that carried the retired 25 m assumption are treated as unknown height.
 
 For optional map assistance, open **Source imagery → Map reference → Advanced · Map reference**. Match at least two known ground coordinates to their positions in the assembled image, then import building/path KML or GeoJSON. A third control point checks alignment. Reference geometry guides classification and retains its source in exports; explicit ground elevations can check relative terrain when a reconstructed grid exists. This is a local import workflow; live Google lookups are not configured. Saving a reference reprocesses proposals and replaces the current feature review.
 
