@@ -41,8 +41,12 @@ class PipelineTest(unittest.TestCase):
     def test_pipeline(self):
         self.assertEqual(self.run_stage('probe')['status'], 'complete')
         frames = json.loads((self.job / 'stages/frames/result.json').read_text()) if self.run_stage('frames') else None
-        flagged = [f for f in frames['frames'] if not f['usable']]
-        self.assertTrue(flagged, 'the blurred and dark frames should be flagged')
+        # Blurred and dark source frames are either flagged or skipped in favour
+        # of a sharper neighbouring candidate, so every usable frame is clean.
+        usable = [f for f in frames['frames'] if f['usable']]
+        median = sorted(f['metrics']['sharpness'] for f in usable)[len(usable) // 2]
+        self.assertTrue(all(f['metrics']['brightness'] > 60 and f['metrics']['sharpness'] > .5 * median for f in usable))
+        self.assertTrue(all(f.get('candidates', 1) >= 2 for f in frames['frames'][:-1]), 'each kept frame is the best of several')
         self.run_stage('correction')
         self.assertEqual(self.run_stage('markers')['status'], 'needs_review')
         markers = json.loads((self.job / 'stages/markers/result.json').read_text())['markers']

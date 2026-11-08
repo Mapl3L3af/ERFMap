@@ -27,7 +27,8 @@ class VideoDetailTest(unittest.TestCase):
             def extract(cmd, **kwargs):
                 commands.append(cmd)
                 start = int(cmd[cmd.index('-start_number') + 1])
-                count = round(float(cmd[cmd.index('-t') + 1]) * 2)
+                rate = float(cmd[cmd.index('-vf') + 1].split(',')[0][4:])
+                count = round(float(cmd[cmd.index('-t') + 1]) * rate)
                 for index in range(start, start + count):
                     (out / ('f%08d.jpg' % index)).touch()
                 return SimpleNamespace(returncode=0)

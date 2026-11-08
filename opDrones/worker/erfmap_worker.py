@@ -39,6 +39,7 @@ MARKER_SIDE_M = 0.3048          # 1 ft x 1 ft ground marker
 VIDEO_CHUNK_SECONDS = 30       # bounded extraction batches, without a whole-video frame cap
 VIDEO_SAMPLE_FPS = 2.0
 FRAME_HEIGHT = 1080              # extracted frame height (px)
+OVERSAMPLE = 3                  # candidate frames decoded per kept frame; the sharpest wins
 MOSAIC_MAX = 2400               # longest mosaic side (px)
 UNCERTAIN_BELOW = 0.6           # classifier confidence that needs review
 STAGES = ['probe', 'frames', 'correction', 'markers', 'regions', 'classification', 'merging', 'geometry']
@@ -415,6 +416,10 @@ def stage_frames(job):
     probe = stage_result(job, 'probe')['metadata']
     duration = probe.get('duration_s') or 0
     fps = min(VIDEO_SAMPLE_FPS, probe.get('fps') or VIDEO_SAMPLE_FPS)
+    # Decode several candidates per kept frame so the sharpest one in each window is used.
+    source_fps = probe.get('fps') or fps * OVERSAMPLE
+    candidates = max(1, min(OVERSAMPLE, int(source_fps // fps) or 1))
+    decode_fps = fps * candidates
     out = stage_dir(job, 'frames')
     for old in out.glob('f*.jpg'):
         old.unlink()
@@ -424,11 +429,11 @@ def stage_frames(job):
     frame_number = 1
     for chunk in range(chunks):
         start = chunk * VIDEO_CHUNK_SECONDS
-        progress(.05 + .25 * chunk / chunks, 'Extracting video section %d of %d at %.2f fps' % (chunk + 1, chunks, fps))
+        progress(.05 + .25 * chunk / chunks, 'Extracting video section %d of %d at %.2f fps' % (chunk + 1, chunks, decode_fps))
         cmd = [ffmpeg, '-v', 'error', '-y', '-ss', str(start), '-i', str(video)]
         if duration:
             cmd += ['-t', str(min(VIDEO_CHUNK_SECONDS, duration - start))]
-        cmd += ['-vf', "fps=%.6f,scale=-2:'min(%d,ih)'" % (fps, FRAME_HEIGHT),
+        cmd += ['-vf', "fps=%.6f,scale=-2:'min(%d,ih)'" % (decode_fps, FRAME_HEIGHT),
                 '-start_number', str(frame_number), '-q:v', '2', str(out / 'f%08d.jpg')]
         run = subprocess.run(cmd, capture_output=True, text=True)
         if run.returncode:
@@ -437,12 +442,23 @@ def stage_frames(job):
     files = sorted(out.glob('f*.jpg'))
     if not files:
         raise RuntimeError('FFmpeg produced no frames from this video.')
-    frames = []
+    scored = []
     for i, path in enumerate(files):
         image = imread(path)
-        frames.append({'id': path.stem, 'index': i, 'time_s': round(i / fps, 2), 'image': rel(job, path),
+        scored.append({'id': path.stem, 'time_s': round(i / decode_fps, 2), 'image': rel(job, path), 'path': path,
                        'width': image.shape[1], 'height': image.shape[0], 'metrics': frame_metrics(image)})
         progress(.3 + .6 * (i + 1) / len(files), 'Scoring frame %d of %d' % (i + 1, len(files)))
+    frames = []
+    for start in range(0, len(scored), candidates):
+        window = scored[start:start + candidates]
+        best = max(window, key=lambda f: f['metrics'].get('sharpness', 0))
+        for f in window:
+            if f is not best:
+                f['path'].unlink(missing_ok=True)
+        best.pop('path')
+        frames.append({**best, 'index': len(frames), 'candidates': len(window)})
+    for f in scored:
+        f.pop('path', None)
     return score_frames(frames, fps)
 
 
@@ -620,16 +636,25 @@ def stage_correction(job):
     W, H_ = int(math.ceil(span[0] * s)) + 1, int(math.ceil(span[1] * s)) + 1
     acc = np.zeros((H_, W, 3), np.float32)
     weight = np.zeros((H_, W), np.float32)
+    # Where frames overlap, the sharpest one dominates (weight grows with the 4th
+    # power of its sharpness), feathered toward its edges so no seams appear.
+    sharp_by_id = {f['id']: f['metrics']['sharpness'] for f in frames if f.get('metrics')}
+    top = max([sharp_by_id.get(corrected[i]['id'], 0) for i in to_ref] + [1e-6])
     for n, i in enumerate(sorted(to_ref)):
         M = T @ to_ref[i]
         image = imread(Path(job) / corrected[i]['after']).astype(np.float32)
         warped = cv2.warpPerspective(image, M, (W, H_))
-        mask = cv2.warpPerspective(np.ones(image.shape[:2], np.float32), M, (W, H_))
+        h, w = image.shape[:2]
+        inside = np.zeros((h + 2, w + 2), np.uint8); inside[1:-1, 1:-1] = 1
+        feather = cv2.distanceTransform(inside, cv2.DIST_L2, 3)[1:-1, 1:-1]
+        feather = np.minimum(feather / max(1.0, .08 * min(h, w)), 1.0).astype(np.float32)
+        quality = max(1e-3, sharp_by_id.get(corrected[i]['id'], top) / top) ** 4
+        mask = cv2.warpPerspective(feather * quality, M, (W, H_))
         acc += warped * mask[:, :, None]
         weight += mask
         corrected[i]['to_mosaic'] = to_list(M)
         progress(.8 + .2 * (n + 1) / len(to_ref), 'Building alignment preview')
-    mosaic = (acc / np.maximum(weight, 1e-6)[:, :, None]).clip(0, 255).astype(np.uint8)
+    mosaic = np.rint(acc / np.maximum(weight, 1e-6)[:, :, None]).clip(0, 255).astype(np.uint8)
     mosaic[weight == 0] = (32, 32, 32)
     cv2.imwrite(str(out / 'mosaic.png'), mosaic)
     aligned = len(to_ref)
@@ -876,8 +901,10 @@ def keyframes(job, limit=None):
     frames = [f for f in corr['frames'] if 'to_mosaic' in f]
     if limit is None or len(frames) <= limit:
         return frames
-    step = (len(frames) - 1) / (limit - 1)
-    return [frames[round(i * step)] for i in range(limit)]
+    # Spread keyframes across the flight, taking the sharpest frame in each stretch.
+    sharp = {f['id']: f['metrics']['sharpness'] for f in stage_result(job, 'frames')['frames']}
+    bounds = np.linspace(0, len(frames), limit + 1).round().astype(int)
+    return [max(frames[a:b], key=lambda f: sharp.get(f['id'], 0)) for a, b in zip(bounds[:-1], bounds[1:]) if b > a]
 
 
 def external(command, payload, what):
