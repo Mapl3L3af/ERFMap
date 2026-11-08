@@ -20,6 +20,7 @@
     back:'m10 5-7 7 7 7M3 12h18',
     drone:'m8 8 8 8M8 16l8-8M9 6a3 3 0 1 1-6 0 3 3 0 0 1 6 0m12 0a3 3 0 1 1-6 0 3 3 0 0 1 6 0M9 18a3 3 0 1 1-6 0 3 3 0 0 1 6 0m12 0a3 3 0 1 1-6 0 3 3 0 0 1 6 0',
     people:'M9 7a3 3 0 1 1-6 0 3 3 0 0 1 6 0m12 0a3 3 0 1 1-6 0 3 3 0 0 1 6 0M1 21v-4a5 5 0 0 1 10 0v4m2 0v-4a5 5 0 0 1 10 0v4',
+    score:'M12 3v18M8 21h8M5 7h14M5 7l-3 7a3 3 0 0 0 6 0Zm14 0-3 7a3 3 0 0 0 6 0Z',
     info:'M12 11v6m0-10v.01M22 12a10 10 0 1 1-20 0 10 10 0 0 1 20 0'
   };
   function icon(name) {
@@ -28,7 +29,7 @@
     const path=document.createElementNS(svg.namespaceURI,'path');path.setAttribute('d',paths[name]);svg.append(path);return svg;
   }
   const ids={import:'upload',save:'save',load:'folder',fit:'fit',pan:'pan',toolbarSelect:'select',distanceTool:'ruler',toolbarUndo:'undo',undo:'undo',undoMark:'undo',lightMode:'sun',darkMode:'moon',plus:'plus',minus:'minus',closeProperties:'close',fold:'close',flat:'back'};
-  const tabs={Add:'plus',Analyse:'chart',Simulate:'play',Properties:'sliders'};
+  const tabs={Add:'plus',Analyse:'chart',Score:'score',Simulate:'play',Properties:'sliders'};
   function enhance(button){
     if(!(button instanceof HTMLButtonElement))return;
     const name=ids[button.id] || tabs[button.dataset.tab] || ({fit:'fit',pan:'pan',select:'select'})[button.dataset.map] || button.dataset.icon;
