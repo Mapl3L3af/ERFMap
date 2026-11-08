@@ -1,0 +1,65 @@
+'use strict';
+const $ = id => document.getElementById(id);
+const classes = [
+  {id:1,name:'Path',color:'#efb64d',tool:'polyline'},
+  {id:2,name:'Building',color:'#6389e9',tool:'polygon'},
+  {id:3,name:'Tree',color:'#55ab6a',tool:'point'},
+  {id:4,name:'Bench',color:'#c37fe0',tool:'point'},
+  {id:5,name:'Light',color:'#f17e62',tool:'point'},
+  {id:6,name:'Bush',color:'#70936a',tool:'point'},
+  {id:7,name:'Road',color:'#858c99',tool:'polygon'},
+  {id:8,name:'Grass',color:'#a2be65',tool:'polygon'}
+];
+let trainingBusy=false;
+let project={version:1,images:[]}, current=null, category=1, tool='polyline', draft=[], drag=false, history=[], bitmap=null, view={scale:1,x:0,y:0}, db;
+const canvas=$('canvas'),ctx=canvas.getContext('2d');
+const status=message=>$('status').textContent=message;
+const active=()=>project.images.find(i=>i.id===current);
+const uid=()=>crypto.randomUUID();
+const request=indexedDB.open('erfmap-semantic-studio',1);
+request.onupgradeneeded=()=>request.result.createObjectStore('projects');
+request.onsuccess=()=>{db=request.result;const read=db.transaction('projects').objectStore('projects').get('current');read.onsuccess=()=>{if(read.result){project=read.result;select(project.images[0]?.id);render();status('Restored saved project');}};};
+request.onerror=()=>status('Browser storage unavailable. Save a project file to keep your work.');
+function persist(){if(!db)return;const tx=db.transaction('projects','readwrite');tx.objectStore('projects').put(project,'current');tx.oncomplete=()=>status('Saved in this browser');tx.onerror=()=>status('Autosave failed. Use Save project to back up your work.');}
+function checkpoint(){history.push(JSON.stringify(project));if(history.length>30)history.shift();}
+function cancel(){draft=[];drag=false;draw();}
+function render(){
+ $('images').replaceChildren(...project.images.map(i=>{const b=document.createElement('button');b.className='image-row'+(current===i.id?' active':'');const im=document.createElement('img');im.src=i.data;im.alt='';const t=document.createElement('span');t.textContent=i.name;b.append(im,t);b.onclick=()=>select(i.id);return b;}));
+ $('classes').replaceChildren(...classes.map(c=>{const b=document.createElement('button');b.className='class'+(category===c.id?' active':'');b.innerHTML=`<span class="dot" style="background:${c.color}"></span><span>${c.name}</span><small>${active()?.annotations.filter(a=>a.category_id===c.id).length||0}</small>`;b.onclick=()=>{category=c.id;tool=c.tool;cancel();render();};return b;}));
+ $('tools').replaceChildren(...[['box','▣ Box'],['polyline','⌁ Segmented line'],['point','• Dot'],['polygon','⬡ Polygon']].map(([id,label])=>{const b=document.createElement('button');b.textContent=label;b.className='class'+(tool===id?' active':'');b.onclick=()=>{tool=id;cancel();render();};return b;}));
+ const img=active(), list=img?.annotations||[];$('count').textContent=`${list.length} object${list.length===1?'':'s'}`;
+ $('annotations').replaceChildren(...list.map((a,index)=>{const row=document.createElement('div');row.className='annotation';const c=classes.find(c=>c.id===a.category_id);const dot=document.createElement('span');dot.className='dot';dot.style.background=c.color;const text=document.createElement('span');text.textContent=`${c.name} ${index+1} · ${a.type}`;const del=document.createElement('button');del.textContent='×';del.setAttribute('aria-label',`Delete ${c.name} ${index+1}`);del.onclick=()=>{checkpoint();img.annotations=img.annotations.filter(x=>x.id!==a.id);persist();render();draw();};row.append(dot,text,del);return row;}));
+ $('filename').textContent=img?.name||'No image selected';$('dimensions').textContent=img?`${img.width} × ${img.height} px · ${classes.find(c=>c.id===category).name} / ${tool}`:'Upload an image to get started';$('empty').style.display=img?'none':'flex';$('undo').disabled=!history.length;$('export').disabled=trainingBusy||!project.images.some(i=>i.annotations.length);
+ const labelled=project.images.filter(i=>i.annotations.length), used=new Set(labelled.flatMap(i=>i.annotations.map(a=>a.category_id)));
+ const sparse=labelled.flatMap(i=>i.annotations).filter(a=>['point','polyline'].includes(a.type)).length;
+ $('dataset-health').textContent=`${labelled.length}/${project.images.length} images labelled · ${used.size}/${classes.length} classes represented. `+(sparse?'Dots and lines teach narrow samples; use polygons for full surface and canopy boundaries. ':'')+'Include different flights, lighting and surfaces. Keep a separate flight for evaluating predictions; adjacent overlapping photos are not independent validation.';
+}
+async function select(id){current=id;bitmap=null;cancel();render();const img=active();if(!img)return;const b=new Image();b.src=img.data;await b.decode();if(current!==id)return;bitmap=b;fit();}
+function fit(){const img=active();if(!img)return;const r=canvas.getBoundingClientRect();view.scale=Math.min(r.width/img.width,r.height/img.height)*.94;view.x=(r.width-img.width*view.scale)/2;view.y=(r.height-img.height*view.scale)/2;draw();}
+function shape(a,preview=false){const c=classes.find(c=>c.id===a.category_id);ctx.strokeStyle=c.color;ctx.fillStyle=c.color;ctx.lineWidth=2/view.scale;ctx.globalAlpha=1;const p=a.points;if(!p.length)return;ctx.beginPath();if(a.type==='point'){ctx.arc(p[0][0],p[0][1],5/view.scale,0,Math.PI*2);ctx.fill();ctx.strokeStyle='white';ctx.stroke();return;}if(a.type==='box'&&p.length===2){ctx.rect(Math.min(p[0][0],p[1][0]),Math.min(p[0][1],p[1][1]),Math.abs(p[1][0]-p[0][0]),Math.abs(p[1][1]-p[0][1]));}else{ctx.moveTo(...p[0]);p.slice(1).forEach(v=>ctx.lineTo(...v));if(a.type==='polygon')ctx.closePath();}if(a.type!=='polyline'){ctx.globalAlpha=Number($('opacity').value)/100;ctx.fill();ctx.globalAlpha=1;}ctx.stroke();if(preview){p.forEach(v=>{ctx.beginPath();ctx.arc(...v,3/view.scale,0,Math.PI*2);ctx.fill();});}}
+function draw(){const r=canvas.getBoundingClientRect(),dpr=window.devicePixelRatio||1;canvas.width=Math.round(r.width*dpr);canvas.height=Math.round(r.height*dpr);ctx.setTransform(dpr,0,0,dpr,0,0);ctx.clearRect(0,0,r.width,r.height);if(!bitmap)return;ctx.translate(view.x,view.y);ctx.scale(view.scale,view.scale);ctx.drawImage(bitmap,0,0);active()?.annotations.forEach(a=>shape(a));if(draft.length)shape({category_id:category,type:tool,points:draft},true);}
+function position(e){const r=canvas.getBoundingClientRect();return [(e.clientX-r.left-view.x)/view.scale,(e.clientY-r.top-view.y)/view.scale];}
+function inside(p){const i=active();return i&&p[0]>=0&&p[1]>=0&&p[0]<=i.width&&p[1]<=i.height;}
+function add(points){checkpoint();active().annotations.push({id:uid(),category_id:category,type:tool,points:points.map(p=>p.map(n=>Math.round(n*100)/100))});cancel();persist();render();draw();}
+function finish(){if((tool==='polyline'&&draft.length>=2)||(tool==='polygon'&&draft.length>=3))add(draft);else status('Add more corners before finishing.');}
+canvas.onpointerdown=e=>{if(!bitmap||e.button!==0)return;const p=position(e);if(!inside(p))return;if(tool==='point'){add([p]);return;}if(tool==='box'){draft=[p,p];drag=true;canvas.setPointerCapture(e.pointerId);}else if(e.detail<2){draft.push(p);draw();}};
+canvas.onpointermove=e=>{if(!drag)return;const i=active(),p=position(e);draft[1]=[Math.max(0,Math.min(i.width,p[0])),Math.max(0,Math.min(i.height,p[1]))];draw();};
+canvas.onpointerup=()=>{if(!drag)return;drag=false;if(Math.abs(draft[1][0]-draft[0][0])*view.scale>3&&Math.abs(draft[1][1]-draft[0][1])*view.scale>3)add(draft);else cancel();};
+canvas.onpointercancel=cancel;canvas.ondblclick=()=>{if(tool==='polygon'||tool==='polyline')finish();};
+$('undo').onclick=()=>{if(!history.length)return;project=JSON.parse(history.pop());cancel();persist();select(active()?current:project.images[0]?.id);};
+window.onkeydown=e=>{if(e.target.matches('input,textarea'))return;if(e.key==='Escape')cancel();if(e.key==='Enter'){e.preventDefault();finish();}if(e.key==='Backspace'&&draft.length){e.preventDefault();draft.pop();draw();}if((e.ctrlKey||e.metaKey)&&e.key.toLowerCase()==='z'){e.preventDefault();$('undo').click();}};
+$('fit').onclick=fit;$('opacity').oninput=draw;new ResizeObserver(fit).observe($('viewport'));
+function fileData(file){return new Promise((resolve,reject)=>{const r=new FileReader();r.onload=()=>resolve(r.result);r.onerror=()=>reject(Error('Could not read file.'));r.readAsDataURL(file);});}
+$('upload').onchange=async e=>{try{for(const f of e.target.files){if(!['image/png','image/jpeg','image/webp'].includes(f.type))throw Error('Choose PNG, JPEG or WebP images.');const data=await fileData(f),im=new Image();im.src=data;await im.decode();checkpoint();const img={id:uid(),name:f.name,width:im.naturalWidth,height:im.naturalHeight,data,annotations:[]};project.images.push(img);await select(img.id);persist();}}catch(error){status(error.message);}e.target.value='';};
+$('start').onclick=()=>$('upload').click();
+function download(name,data,type='application/json'){const url=URL.createObjectURL(new Blob([data],{type}));const a=document.createElement('a');a.href=url;a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(url),1000);}
+$('save').onclick=()=>download('semantic-project.json',JSON.stringify(project));
+$('load').onclick=()=>$('project').click();
+function validate(p){if(p?.version!==1||!Array.isArray(p.images))throw Error('Unsupported project file.');const ids=new Set();for(const i of p.images){if(typeof i.id!=='string'||ids.has(i.id)||typeof i.name!=='string'||!/^data:image\/(png|jpeg|webp);base64,/.test(i.data)||!Number.isFinite(i.width)||!Number.isFinite(i.height)||i.width<=0||i.height<=0||!Array.isArray(i.annotations))throw Error('Invalid image in project.');ids.add(i.id);for(const a of i.annotations){const n={point:1,box:2,polyline:2,polygon:3}[a.type];if(!n||!classes.some(c=>c.id===a.category_id)||typeof a.id!=='string'||!Array.isArray(a.points)||a.points.length<n||(['point','box'].includes(a.type)&&a.points.length!==n)||!a.points.every(p=>Array.isArray(p)&&p.length===2&&p.every(Number.isFinite)&&p[0]>=0&&p[1]>=0&&p[0]<=i.width&&p[1]<=i.height))throw Error('Invalid annotation in project.');}}return p;}
+$('project').onchange=async e=>{try{const f=e.target.files[0];if(!f)return;const p=validate(JSON.parse(await f.text()));for(const i of p.images){const im=new Image();im.src=i.data;await im.decode();if(im.naturalWidth!==i.width||im.naturalHeight!==i.height)throw Error('Image dimensions do not match project.');}checkpoint();project=p;persist();await select(p.images[0]?.id);}catch(error){status('Could not open project: '+error.message);}e.target.value='';};
+$('export').onclick=async()=>{if(!project.images.some(i=>i.annotations.length)){status('Add labels before training.');return;}const dataset={format:'erfmap-semantic-annotations',version:1,coordinate_system:'image pixels; origin top-left; x right; y down',categories:classes.map(({id,name})=>({id,name:name.toLowerCase()})),images:project.images.map(i=>({id:i.id,file_name:i.name,width:i.width,height:i.height,data_url:i.data})),annotations:project.images.flatMap(i=>i.annotations.map(a=>({...a,image_id:i.id}))),notes:'Boxes: two opposite corners. Polylines: ordered vertices. Points: one coordinate. Polygons: closed boundary, implicit closing edge. These labels require a geometry-aware training adapter; polylines and points are not segmentation masks.'};download('semantic-training-data.json',JSON.stringify(dataset));if(location.protocol==='file:'){status('Backup exported. Open Semantic Studio on the erfMap server at /semantic-labeler/ to train automatically.');return;}
+try{trainingBusy=true;render();status('Uploading labels for training…');const response=await fetch('/api/training',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(dataset)});const result=await response.json();if(!response.ok)throw Error(result.error||result.message||'Could not start training.');pollTraining();}catch(error){trainingBusy=false;render();status('Backup exported. Training failed: '+error.message);}};
+let trainingTimer;
+async function pollTraining(){clearTimeout(trainingTimer);try{const response=await fetch('/api/training');if(!response.ok)throw Error('Training server unavailable.');const job=await response.json();trainingBusy=job.status==='training';render();if(job.status!=='idle')status(job.message);if(trainingBusy)trainingTimer=setTimeout(pollTraining,2000);}catch(error){trainingBusy=false;render();status('Could not check training: '+error.message+' Reload to reconnect.');}}
+if(location.protocol!=='file:')pollTraining();
+render();
