@@ -2,7 +2,7 @@
 
 New images have no assumed capture height. The selected-image height field can record a known height for that image. Saved projects and training exports preserve height per image, including whether it was assumed or supplied; older images remain unknown. The trainer saves this provenance with its summary. Use a separate held-out flight to assess the model. Altitude metadata alone does not retrain weights, establish map scale or recover elevation.
 
-Start erfMap with `npm start`, then open http://localhost:3000/semantic-labeler/.
+On Windows, double-click **Start Semantic Studio.cmd** in this folder (or run `node server.js` in `opDrones`), then open http://localhost:3000/semantic-labeler/. On macOS, run `npm start` in `opDrones`. The `.command` file is macOS-only and serves annotation without training.
 
 Install training dependencies once in the Python environment used by the server:
 
