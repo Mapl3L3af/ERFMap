@@ -16,8 +16,12 @@ document.addEventListener('click',e=>{
         tab=target.dataset.openPanel;folded=false;render();
     }else if(command){
         if(['import','save','fit','plus','minus'].includes(command))$(command).click();
-        else if(['contours','measure'].includes(command)){
-            const input=$(command);if(!input.disabled){input.checked=!input.checked;input.dispatchEvent(new Event('change',{bubbles:true}));}
+        else if(['contours','measure','textures'].includes(command)){
+            const input=$(command==='textures'?'surveyTextures':command);if(!input.disabled){input.checked=!input.checked;input.dispatchEvent(new Event('change',{bubbles:true}));}
+        }else if(command==='exportGlb'){
+            exportGlbFile();
+        }else if(command==='attachPhoto'){
+            $('photoFile').click();
         }else if(command==='undo'){
             if(history.length){site.features=JSON.parse(history.pop());sel=-1;vertexSel=-1;draft=[];commit();}
         }else if(command==='properties'){

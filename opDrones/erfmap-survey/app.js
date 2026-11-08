@@ -90,7 +90,7 @@ function feature(f, i) {
     const p = f.p.map(q => project(q)), c = featureColor(f), selected = i === sel && !view3;
     let s = '';
     if (isArea(f)) {
-        const fill = f.kind === 'building' && !f.itemType ? 'url(#hatch)' : c;
+        const fill = surveyTexture.fill(site, f) || (f.kind === 'building' && !f.itemType ? 'url(#hatch)' : c);
         s += poly(p,fill,selected?'#155d76':'#647780');
         if (!view3 && f.kind === 'building' && ($('measure').checked || selected)) {
             let m = p.reduce((v, q) => [v[0] + q[0] / p.length, v[1] + q[1] / p.length], [0, 0]);
@@ -103,8 +103,8 @@ function feature(f, i) {
         if (f.kind === 'path' && f.tagProperties?.widthProfile) {
             const widths = featureSegmentWidths(f).map(v => Math.max(3, Math.min(60, scale*v)));
             for (let j=0;j<widths.length;j++) s += line(p.slice(j,j+2), '#938d77', widths[j]+2);
-            for (let j=0;j<widths.length;j++) s += line(p.slice(j,j+2), c, widths[j]);
-        } else s += line(p, '#938d77', width + 2) + line(p, c, width, invisible ? 'stroke-dasharray="3 4" opacity=".38"' : '');
+            for (let j=0;j<widths.length;j++) s += line(p.slice(j,j+2), surveyTexture.fill(site, f) || c, widths[j]);
+        } else s += line(p, '#938d77', width + 2) + line(p, surveyTexture.fill(site, f) || c, width, invisible ? 'stroke-dasharray="3 4" opacity=".38"' : '');
         if (selected && ['path', 'road'].includes(f.itemType))
             s += label(p[Math.floor(p.length / 2)], Number(f.tagProperties?.width || (f.itemType === 'road' ? 6 : 1.8)).toFixed(1) + ' m · ' + (f.tagProperties?.surface || (f.itemType === 'road' ? 'Road' : 'Path')), 9);
     }
@@ -211,6 +211,7 @@ function draw() {
     cx=(W+sidebar)/2+offset[0];cy=(H+topInset-bottomInset)/2+offset[1];
     scale=zoom*Math.min(Math.max(80,W-sidebar-66)/site.w,Math.max(80,H-topInset-bottomInset)/site.h);
     let s='<defs><pattern id="hatch" patternUnits="userSpaceOnUse" width="6" height="6"><rect width="6" height="6" fill="'+chrome().hatch+'"/><path d="M-1 1L1 -1M0 6L6 0M5 7L7 5" stroke="'+chrome().hatchLine+'" stroke-width=".8"/></pattern><radialGradient id="orb"><stop stop-color="#ffd88a"/><stop offset="1" stop-color="#e07c39"/></radialGradient></defs>';
+    s += surveyTexture.definitions(site, project, scale);
     s += poly(rect(0,0,site.w,site.h).map(q=>project(q)),chrome().ground,chrome().edge,'stroke-dasharray="5 3"');
     const top=project([site.w/2,0]);
     s+=label([top[0],top[1]-10],n(site.w)+' m  ·  E–W');
@@ -283,8 +284,75 @@ function draw() {
     multiplayer.paintPlan();
     svg.innerHTML = s;
 }
+// ---- proposal scoring panel: recalculated whenever the plan, rates or assumptions change
+let scoreCache = {key: '', result: null};
+function currentScore() {
+    const key = JSON.stringify([site.features, site.scoring, site.w, site.h]);
+    if (key !== scoreCache.key) scoreCache = {key, result: proposalScoring.evaluate(site, {kinds})};
+    return scoreCache.result;
+}
+const money = v => (v < 0 ? '−$' : '$') + Math.round(Math.abs(v)).toLocaleString('en-US');
+const signed = (v, d = 1) => (v > 0 ? '+' : v < 0 ? '−' : '±') + Math.abs(v).toFixed(d);
+const span = (r, f) => '<small class="range">' + f(r.low) + ' to ' + f(r.high) + '</small>';
+function scoreMarkup() {
+    if (view3) return '<p class="note">Return to the plan to review proposal scores.</p>' + button('Edit in 2D Plan', 'id="editplan"');
+    const r = currentScore(), t = r.totals;
+    const card = (label, value, range, tone, sub) => '<div class="score-card ' + tone + '"><small>' + label + '</small><b>' + value + '</b>' + range + (sub ? '<small>' + sub + '</small>' : '') + '</div>';
+    const tone = v => v > .05 ? 'up' : v < -.05 ? 'down' : '';
+    let h = '<p class="note">Each proposed change is compared against current conditions' + (site.scoring?.baseline ? ' saved ' + new Date(site.scoring.baseline.at).toLocaleString() : ' (every item not marked Proposed)') + '. Scores update as you edit the plan or the rates below.</p>';
+    h += '<div class="score-cards">'
+        + card('Estimated cost', money(t.cost.mid), span(t.cost, money), '', r.changes.length + ' change' + (r.changes.length === 1 ? '' : 's'))
+        + card('Ecology', signed(t.ecology.mid), span(t.ecology, v => signed(v)), tone(t.ecology.mid), t.ecologyScore.before.toFixed(0) + ' → ' + t.ecologyScore.after.toFixed(0) + ' of 100')
+        + card('Satisfaction', signed(t.satisfaction.mid), span(t.satisfaction, v => signed(v)), tone(t.satisfaction.mid), t.satisfactionScore.before.toFixed(0) + ' → ' + t.satisfactionScore.after.toFixed(0) + ' of 100')
+        + card('Likely activity', signed(t.activity.mid, 0) + '/day', span(t.activity, v => signed(v, 0)), tone(t.activity.mid), 'visits, from ' + r.assumptions.visitsPerDay + '/day')
+        + '</div>';
+    h += '<div class="row">' + button(site.scoring?.baseline ? 'Update baseline to now' : 'Save current plan as baseline', 'id="setBaseline" title="Score later edits against the plan as it is right now"') + (site.scoring?.baseline ? button('Use unproposed items', 'id="clearBaseline" title="Compare against every item not marked Proposed"') : '') + '</div>';
+    for (const w of r.warnings) h += '<p class="note warn">' + esc(w) + '</p>';
+    h += '<h3>Changes</h3>';
+    h += r.changes.length ? '<ol class="change-list">' + r.changes.map(c => '<li><button type="button" class="change" data-score-feature="' + esc(c.id) + '"><span class="change-head"><b>' + esc(c.name) + '</b><span class="pill ' + c.type + '">' + c.type + '</span></span>'
+        + '<span class="change-metrics"><span>' + money(c.cost.mid) + '</span><span class="' + tone(c.ecology.mid) + '">Eco ' + signed(c.ecology.mid) + '</span><span class="' + tone(c.satisfaction.mid) + '">Sat ' + signed(c.satisfaction.mid) + '</span><span class="' + tone(c.activity.mid) + '">' + signed(c.activity.mid, 0) + '/day</span></span>'
+        + '<small>' + esc(c.cost.detail) + (Math.abs(c.permeable) > .5 ? ' · permeable ' + signed(c.permeable, 0) + ' m²' : '') + (Math.abs(c.vegetation) > .5 ? ' · vegetation ' + signed(c.vegetation, 0) + ' m²' : '') + '</small>'
+        + c.notes.map(n => '<small class="warn">' + esc(n) + '</small>').join('') + '</button></li>').join('') + '</ol>'
+        : '<p class="note">No proposed changes yet. Add items from the Add tab, or edit existing ones after saving a baseline.</p>';
+    h += '<details class="score-details"><summary>Unit rates (editable)</summary><div class="rate-grid">' + Object.entries(proposalScoring.RATES).map(([k, v]) => '<label>' + esc(v.label) + ' <small>$/' + v.unit + '</small><input type="number" min="0" step="any" data-rate="' + k + '" value="' + r.rates[k] + '"></label>').join('') + '</div>' + button('Reset rates', 'id="resetRates"') + '</details>';
+    h += '<details class="score-details"><summary>Assumptions & uncertainty</summary><div class="rate-grid">'
+        + [['visitsPerDay', 'Baseline visits / day'], ['rateUncertainty', 'Rate uncertainty (±share)'], ['crownRadius', 'Crown radius ÷ max growth'], ['accessReach', 'Access reach (m)']].map(([k, l]) => '<label>' + l + '<input type="number" min="0" step="any" data-assumption="' + k + '" value="' + r.assumptions[k] + '"></label>').join('')
+        + '</div><ul class="assumptions">' + r.assumptionNotes.map(n => '<li>' + esc(n) + '</li>').join('') + '</ul></details>';
+    h += '<details class="score-details"><summary>Rubric</summary>' + r.rubric.map(g => '<h4>' + g.score + ' <small>' + g.weight + '</small></h4><ul class="assumptions">' + g.parts.map(([name, w, how]) => '<li><b>' + name + '</b> · ' + w + (g.weight === '0–100' ? ' pts' : '%') + '<br><small>' + esc(how) + '</small></li>').join('') + '</ul>').join('')
+        + '<h4>Current conditions → plan</h4><table class="rubric-table"><tr><th></th><th>Now</th><th>Plan</th></tr>' + Object.keys(r.baseline.parts).map(k => '<tr><td>' + k + '</td><td>' + r.baseline.parts[k].toFixed(1) + '</td><td>' + r.scenario.parts[k].toFixed(1) + '</td></tr>').join('') + '</table></details>';
+    return h;
+}
+function importReportMarkup() {
+    const r = site.importReport;
+    if (!r) return '';
+    return '<div class="note ' + (r.complete ? '' : 'warn') + ' import-report"><b>' + (r.complete ? 'Imported with all survey data.' : 'Imported, but some survey data is missing:') + '</b>'
+        + (r.missing.length ? '<ul>' + r.missing.map(m => '<li>' + esc(m) + '</li>').join('') + '</ul>' : '')
+        + r.notes.map(n => '<small>' + esc(n) + '</small>').join('<br>') + '<br>' + button('Dismiss', 'id="dismissImport"') + '</div>';
+}
+function download(bytes, name, type) {
+    const url = URL.createObjectURL(new Blob([bytes], {type})), a = document.createElement('a');
+    a.href = url; a.download = name; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+function exportGlbFile() {
+    try {
+        const mesh = elevationMesh(site);
+        const glb = surveyIO.exportGlb(site, {kinds, color: featureColor, heightAt: p => mesh.at(p)});
+        download(glb, (site.name || 'survey').replace(/[^\w\- ]+/g, '').trim().replace(/\s+/g, '-').toLowerCase() + '.glb', 'model/gltf-binary');
+        msg = 'Exported a textured GLB with ' + site.features.length + ' items. Open it in erfMap to get the full survey back.';
+    } catch (err) { msg = 'Could not export the 3D model: ' + err.message; }
+    render();
+}
+function selectFromWalk(i) {
+    if (i < 0) msg = 'Nothing to select there. Click a building, tree, path or item.';
+    else { sel = i; vertexSel = -1; tab = tab === 'Properties' ? tab : 'Add'; msg = 'Selected ' + site.features[i].name + '. Open Properties to edit it, or Back to plan to reshape it.'; }
+    walk.invalidate(); render();
+}
 const hints = { 'Select': 'Select and drag vertices or standalone items. Backspace removes the selected vertex, or the feature if no vertex is selected.', 'Draw feature': 'Click to place points. Paths snap to nearby junctions and segments. Finish the shape below.', 'Move vertex': 'Select a feature, then drag a white handle.' };
 function render() {
+    surveyTexture.sync(site);
+    $('contours').closest('label').title = site.samples.length ? 'Heights are relative to the survey\'s local zero, not sea level.' : 'No ground heights in this survey, so there is nothing to contour.';
+    document.querySelector('[data-command="contours"]')?.setAttribute('aria-pressed', String(contours && !$('contours').disabled));
     $('name').textContent = site.name;
     $('subtitle').textContent = (site.demo ? 'Demonstration survey' : 'Imported survey') + '   •   ' + site.features.length + ' mapped features   •   Local metres';
     document.body.classList.toggle('walking',view3);
@@ -293,7 +361,7 @@ function render() {
     $('toolBody').hidden=folded;
     $('fold').textContent='Close panel';
     $('fold').closest('aside').hidden=folded;
-    $('panelTitle').textContent=tab==='Add'?'Add features':tab==='Analyse'?'Analysis':tab==='Properties'?'Properties & tagging':'Simulation';
+    $('panelTitle').textContent=tab==='Add'?'Add features':tab==='Analyse'?'Analysis':tab==='Properties'?'Properties & tagging':tab==='Score'?'Proposal score':'Simulation';
     $('toolbarUndo').disabled=!history.length;
     $('contours').checked=contours;
     $('contours').disabled=!site.samples.length && !site.contours?.length;
@@ -312,13 +380,15 @@ function render() {
     $('styleControl').hidden=!view3;
     $('walker').hidden=view3; $('flat').hidden=!view3;
     $('badge').textContent = view3 ? 'FIELD TRIP   //   FIRST PERSON' : '↑ N    │    S–01   SITE PLAN';
-    $('tabs').innerHTML = ['Add', 'Analyse', 'Simulate', 'Properties'].map(t => button(t, 'data-tab="' + t + '"' + (t === 'Properties' ? ' title="' + (sel >= 0 ? 'Edit selected item properties and tags' : 'Select an item to view its properties and tags') + '"' : '') + ' aria-expanded="'+String(!folded&&t===tab)+'"', t === tab&&!folded)).join('');
+    $('tabs').innerHTML = ['Add', 'Analyse', 'Score', 'Simulate', 'Properties'].map(t => button(t, 'data-tab="' + t + '"' + (t === 'Properties' ? ' title="' + (sel >= 0 ? 'Edit selected item properties and tags' : 'Select an item to view its properties and tags') + '"' : '') + ' aria-expanded="'+String(!folded&&t===tab)+'"', t === tab&&!folded)).join('');
     let h = '';
     if (tab === 'Add') {
         if (view3)
-            h = '<div class="note">Walk with WASD or arrows. Hold Shift to run, press Space to jump, and drag to look around. Return to the plan to use map analysis tools.</div>' + button('Edit in 2D Plan', 'id="editplan"');
+            h = '<div class="note">Walk with WASD or arrows. Hold Shift to run, press Space to jump, and drag to look around. Click any building, tree, path or item to select it.</div>'
+                + (sel >= 0 && site.features[sel] ? '<h3>' + esc(site.features[sel].name) + '</h3><p class="note">' + esc(kinds[site.features[sel].kind][0]) + ' · ' + esc(site.features[sel].source || '') + (site.features[sel].texture ? ' · photo texture' : '') + '</p>' + button('Properties / Tagging…', 'data-command="properties"') : '')
+                + button('Edit in 2D Plan', 'id="editplan"');
         else {
-            h = '<p class="note">Choose an item to set its name, color, and specifications before placing it.</p>' + featureCatalogMarkup();
+            h = importReportMarkup() + '<p class="note">Choose an item to set its name, color, and specifications before placing it.</p>' + featureCatalogMarkup();
             if (pendingFeature)
                 h += '<div class="placement-ready"><strong>Ready to place: ' + esc(pendingFeature.name) + '</strong><p>' + (isPoint(pendingFeature) ? 'Click the map to place this item.' : 'Click the map to add vertices, then finish the shape.') + '</p>' + button('Cancel placement', 'id="cancel"') + '</div>';
             if (draft.length)
@@ -342,6 +412,7 @@ function render() {
         h=picker+analysisDetailsMarkup(analysisTool,site,trashSpacing);
 
     }
+    if (tab === 'Score') h = scoreMarkup();
     if (tab === 'Properties') {
         h = sel >= 0 && site.features[sel]
             ? '<section id="propertiesPanel"><p class="property-intro">Edit the selected item’s name, color, specifications, and location.</p><p id="propertiesPanelMessage" role="status"></p><div id="propertiesPanelFields"></div><div class="property-actions"><button type="button" id="applyPanelProperties" class="active">Save properties</button></div></section>'
@@ -460,6 +531,20 @@ document.addEventListener('click', e => {
         analysisTool = b.dataset.analysisTool;
         if (analysisTool !== 'Elevation map') profilePoints = [];
     }
+    if (b.dataset.scoreFeature) {
+        const i = site.features.findIndex(f => f._syncId === b.dataset.scoreFeature);
+        if (i >= 0) { sel = i; vertexSel = -1; msg = 'Selected ' + site.features[i].name + '. Drag it on the map or open Properties to change it.'; }
+        else msg = 'That change removed an item, so there is nothing to select.';
+    }
+    if (b.id === 'dismissImport') { delete site.importReport; persist(); }
+    if (['setBaseline', 'clearBaseline', 'resetRates'].includes(b.id)) {
+        site.scoring = {...site.scoring};
+        if (b.id === 'setBaseline') site.scoring.baseline = {at: new Date().toISOString(), features: JSON.parse(JSON.stringify(site.features))};
+        if (b.id === 'clearBaseline') delete site.scoring.baseline;
+        if (b.id === 'resetRates') delete site.scoring.rates;
+        msg = b.id === 'setBaseline' ? 'Baseline saved. Later edits are scored against this plan.' : b.id === 'resetRates' ? 'Unit rates reset.' : 'Comparing against every item not marked Proposed.';
+        persist(); multiplayer.sendSite();
+    }
     switch (b.id) {
         case 'pan':
             view3=false;folded=true;mode='Select';panMode=!panMode;distanceMode=false;distancePoints=[];distancePointer=null;vertexSel=-1;draft=[];pendingFeature=null;placementPointer=null;
@@ -547,18 +632,40 @@ function updatePopulation(settings){
 }
 document.addEventListener('change', async (e) => {
     let el = e.target;
+    if (el.id === 'photoFile') {
+        const file = el.files[0]; el.value = '';
+        if (!file) return;
+        if (file.size > 8 * 1024 * 1024) { msg = 'That photo is over 8 MB. Use a smaller JPEG so the project stays shareable.'; render(); return; }
+        const data = await new Promise((ok, fail) => { const r = new FileReader(); r.onload = () => ok(r.result); r.onerror = () => fail(r.error); r.readAsDataURL(file); }).catch(() => null);
+        if (!data) { msg = 'Could not read that photo.'; render(); return; }
+        checkpoint();
+        const mapped = surveyTexture.attach(site, data, file.name);
+        msg = 'Photo attached over the survey rectangle and mapped onto ' + mapped + ' captured item(s). Proposed items keep their colours.';
+        commit(); return;
+    }
     if (el.id === 'file') {
         try {
             if(!el.files[0])return;
-            const file=el.files[0];
-            let data = /\.glb$/i.test(file.name) ? intakeShared.readGlb(new Uint8Array(await file.arrayBuffer())) : JSON.parse(await file.text());
-            let next = data.type === 'FeatureCollection' ? importSurvey(data) : restore(data.site || data);
+            const file = el.files[0];
+            let next, report = null;
+            if (/\.glb$/i.test(file.name) || file.type === 'model/gltf-binary') {
+                const bytes = new Uint8Array(await file.arrayBuffer());
+                // erfMap's own 3D model export first; otherwise the textured survey GLB or any standalone GLB.
+                let own = null; try { own = intakeShared.readGlb(bytes); } catch {}
+                if (own) next = restore(own.site || own);
+                else { const result = surveyIO.importGlb(bytes, {kinds}); next = restore(result.site); report = result.report; }
+            } else {
+                const data = JSON.parse(await file.text());
+                next = data.type === 'FeatureCollection' ? importSurvey(data) : restore(data.site || data);
+            }
+            if (report && !report.complete) next.importReport = report; else delete next.importReport;
             site = next;contours=site.showContours!==false;profilePoints=[];
             sel = -1;
             history = [];
             draft = [];
             zoom = 1; offset=[0,0];
-            msg = 'Survey loaded.';
+            msg = report ? (report.complete ? 'GLB opened with its full survey: ids, labels, proposals, scores and textures.' : 'GLB opened with gaps. See the Add panel for what is missing.') : 'Survey loaded.';
+            if (report && !report.complete) { tab = 'Add'; folded = false; }
             commit();
         }
         catch (err) {
@@ -569,7 +676,15 @@ document.addEventListener('change', async (e) => {
         return;
     }
     if (el.closest('#propertiesPanelFields') || ['contourInterval','groundFile'].includes(el.id)) return;
-    if(el.id==='contours'){contours=el.checked;site.showContours=contours;persist();multiplayer.sendSite();}
+    if (el.dataset.rate || el.dataset.assumption) {
+        const value = el.valueAsNumber;
+        if (!Number.isFinite(value) || value < 0) { msg = 'Enter a number of 0 or more.'; render(); return; }
+        const group = el.dataset.rate ? 'rates' : 'assumptions', key = el.dataset.rate || el.dataset.assumption;
+        site.scoring = {...site.scoring, [group]: {...site.scoring?.[group], [key]: value}};
+        persist(); multiplayer.sendSite(); render(); return;
+    }
+    if(el.id==='contours'){contours=el.checked;site.showContours=contours;walk.invalidate();persist();multiplayer.sendSite();}
+    if(el.id==='surveyTextures'){site.showTextures=el.checked;walk.invalidate();persist();multiplayer.sendSite();}
     if(el.id==='analysisLayer'){analysisTool=el.value;profilePoints=[];}
     if(el.id==='populationCount'){
         const count=el.valueAsNumber;

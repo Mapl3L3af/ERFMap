@@ -270,10 +270,24 @@ function createIntake({directory, createProject, readBody}) {
         if (!geometry?.features?.length) throw failure(409, 'Map geometry is not ready yet.');
         return shared.reviewedFeatures(geometry, job.review?.features || {}, labels().labels);
     }
+    // The flyover mosaic becomes the survey's photo texture when it is small
+    // enough to keep the project shareable (projects are capped at 16 MB).
+    function textureFor(job, geometry) {
+        const rel = geometry?.mosaic?.image;
+        if (!rel || job.sceneMode !== 'stitched') return null;
+        try {
+            const file = path.join(directory, 'intake', job.id, rel);
+            if (!path.resolve(file).startsWith(path.resolve(directory, 'intake', job.id))) return null;
+            const bytes = fs.readFileSync(file);
+            if (bytes.length > 6 * 1024 * 1024) return null;
+            const mime = /\.png$/i.test(rel) ? 'image/png' : /\.webp$/i.test(rel) ? 'image/webp' : 'image/jpeg';
+            return 'data:' + mime + ';base64,' + bytes.toString('base64');
+        } catch { return null; }
+    }
     function scenario(job) {
         const geometry = result(job.id, 'geometry');
         if (job.sceneMode === 'stitched' && job.review?.phase !== 'ready') throw failure(409, 'Finish zone, point and access review before importing.');
-        const site = shared.buildSite({job, geometry, features: reviewed(job), labels: labels().labels});
+        const site = shared.buildSite({job, geometry, features: reviewed(job), labels: labels().labels, texture: textureFor(job, geometry)});
         if (!site.features.length) throw failure(409, 'Accept at least one feature before exporting.');
         return {format: 'fieldform-site-v1', site: restore(site)};
     }

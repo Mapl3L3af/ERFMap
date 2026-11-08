@@ -1422,9 +1422,24 @@ def stage_geometry(job):
                          'pixel_polygon': g['polygon'], 'confidence': g['confidence'], 'frames': g['frames'],
                          'flags': g['flags'] + ([] if g['kind'] else ['needs label']), 'note': note,
                          'area_m2': round(polygon_area(poly), 2)})
+    # Height above ground, slope and surface shape from a reconstruction (when
+    # one exists) correct imagery labels; otherwise imagery labels stand.
+    import geometry_fusion
+    fusion = geometry_fusion.apply(job, features, (merged['mosaic']['height'], merged['mosaic']['width']), m_per_px, set(labels) or None)
+    for f in features:
+        geometry = labels.get(f['kind'], {}).get('geometry', f['geometry'])
+        if geometry != f['geometry']:     # e.g. a "path" line that is really a roof
+            f['p'], f['width_m'], f['note'] = shape_of(np.array(f['region'], dtype=np.float64), geometry)
+            f['geometry'] = geometry
+    if fusion['used']:
+        warnings.append('3D cues used: %d of %d features relabelled from height above ground, slope and surface shape; %d kept the imagery label where the reconstruction was too sparse.' % (len(fusion['changed']), len(features), fusion['fallback']))
+    else:
+        warnings.append(fusion['reason'])
     features.sort(key=lambda f: (f['geometry'] == 'point', f['kind'] not in BASE_KINDS))    # zones first, points on top after
     allp = np.concatenate([np.array(f['p']) for f in features]) if features else np.zeros((1, 2))
     origin = allp.min(axis=0) - 2
+    if fusion.get('ground_samples'):
+        fusion['ground_samples'] = [[round(x - origin[0], 3), round(y - origin[1], 3), z] for x, y, z in fusion['ground_samples']]
     for f in features:
         f['p'] = [[round(x - origin[0], 3), round(y - origin[1], 3)] for x, y in f['p']]
         f['region'] = [[round(x - origin[0], 3), round(y - origin[1], 3)] for x, y in f['region']]
@@ -1432,7 +1447,7 @@ def stage_geometry(job):
     return {'status': 'needs_review', 'summary': '%d proposed features at %.4f m per mosaic pixel from %d marker(s) and %d measured distance(s)' % (len(features), m_per_px, len(confirmed), len(references)),
             'scale': {'m_per_px': m_per_px, 'markers': len(confirmed), 'references': len(references), 'spread': spread, 'per_marker': per_marker, 'per_reference': per_reference,
                       'origin_px': (origin / m_per_px).tolist(), 'marker_side_m': side_m},
-            'extent_m': extent, 'mosaic': merged['mosaic'], 'features': features, 'evidence': stage_result(job, 'regions').get('evidence'), 'warnings': warnings}
+            'extent_m': extent, 'mosaic': merged['mosaic'], 'features': features, 'geometry_fusion': fusion, 'evidence': stage_result(job, 'regions').get('evidence'), 'warnings': warnings}
 
 
 RUNNERS = {'probe': stage_probe, 'frames': stage_frames, 'capture': stage_capture, 'correction': stage_correction, 'markers': stage_markers,

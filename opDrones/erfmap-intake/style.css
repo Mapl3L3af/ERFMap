@@ -216,3 +216,50 @@ header .brand{color:var(--accent)}
 .review-map-panel #rmap>.mapv{flex:1;height:auto;min-height:240px;margin:8px!important;border-radius:6px}
 #captureHeight{width:7rem;max-width:100%;padding:8px;margin:6px 0;border:1px solid var(--line,#d5ded8);border-radius:7px;font:inherit}
 .reference-viewer{height:420px;margin:16px 0}.reference-points input{width:9rem;max-width:100%}.map-reference input[type=text]{max-width:100%;width:26rem}.map-reference{margin-top:18px}
+
+/* ------------------------------------------------------------------ shared erfMap look
+   Same tokens, type and chrome as the survey workspace so both apps read as one. */
+:root{--bg:#0e1110;--panel:#171b19;--panel2:#1f2522;--line:#2e3632;--line-strong:#43504a;--text:#e7ece9;--dim:#9aa7a1;--faint:#6f7c76;--accent:#b9e283;--accent-ink:#152107;--walk:#f2a54a;
+  --font:"Inter","Helvetica Neue",Arial,system-ui,sans-serif;--mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;--radius:10px;--radius-sm:7px}
+body{background:var(--bg);font:14px/1.5 var(--font);-webkit-font-smoothing:antialiased}
+header{height:56px;background:var(--panel);border-bottom:1px solid var(--line);padding:0 16px;gap:14px}
+header .brand,.review-workspace header .brand{flex-shrink:0;text-decoration:none;font:900 26px/1 "Arial Black",Arial,sans-serif;letter-spacing:-.09em;padding:0 .12em .06em 0;background:url(leaves.svg) center/44px 32px;-webkit-background-clip:text;background-clip:text;color:transparent}
+.title{padding-left:14px;border-left:1px solid var(--line)}
+.title small{font:600 9px/1.3 var(--mono);letter-spacing:.16em;color:var(--faint)}
+.title h1,.review-workspace .title h1{font:650 17px/1.3 var(--font);letter-spacing:-.01em}
+.review-controls h2,.panelhead h2{font-family:var(--font)!important;font-weight:650}
+body.review-workspace{font-family:var(--font)}
+button,.button,select,input{border-color:var(--line);background:var(--panel2);border-radius:var(--radius-sm)}
+button:hover:not(:disabled),.button:hover{filter:none;border-color:var(--line-strong);background:#283029}
+button.primary,.button.primary,.review-map-toolbar button[aria-pressed=true],.review-tabs button[aria-pressed=true]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+button.primary:hover:not(:disabled),.button.primary:hover{background:var(--accent);filter:brightness(1.06)}
+header .button{background:var(--accent);border-color:var(--accent);color:var(--accent-ink);font-weight:650}
+.card,.upload-card,.review-controls,.review-map-panel{border-radius:var(--radius);border-color:var(--line);background:var(--panel)}
+.note{border-radius:0 var(--radius-sm) var(--radius-sm) 0;background:var(--panel2)}
+.drop{border-color:var(--line-strong);border-radius:var(--radius-sm)}
+.drop.over{border-color:var(--accent);background:#b9e2831a}
+.stages .active .step-number{background:var(--accent);color:var(--accent-ink)}
+.bar{background:var(--panel2)}.bar i{background:var(--accent)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+
+/* DJI Neo 2 capture guide */
+.capture-guide h3{font-size:16px;margin:4px 0 10px}
+.capture-guide ol{list-style:none;counter-reset:tip;display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:10px;padding:0;margin:0 0 8px}
+.capture-guide li{counter-increment:tip;display:flex;flex-direction:column;gap:4px;padding:12px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--panel2)}
+.capture-guide li::before{content:"0" counter(tip);font:600 11px var(--mono);color:var(--accent)}
+.capture-guide b{font-weight:600}
+.capture-guide span{color:var(--dim);font-size:13px;line-height:1.5}
+
+/* Footage check after upload */
+.capture-check{margin-top:12px;border:1px solid var(--line);border-radius:var(--radius-sm);background:var(--panel);padding:0 12px;font-size:13px}
+.capture-check summary{cursor:pointer;padding:10px 0;font-weight:600;display:flex;align-items:center;gap:8px}
+.capture-dot{width:9px;height:9px;border-radius:50%;background:var(--complete);flex:none}
+.capture-dot.warn{background:var(--needs_review)}.capture-dot.refilm{background:var(--failed)}
+.capture-issues{list-style:none;padding:0;margin:0 0 8px;display:flex;flex-direction:column;gap:8px}
+.capture-issues li{display:flex;flex-direction:column;gap:3px;padding:10px 12px;border-left:3px solid var(--line-strong);background:var(--panel2);border-radius:0 var(--radius-sm) var(--radius-sm) 0}
+.capture-issues li.refilm{border-color:var(--failed)}.capture-issues li.warn{border-color:var(--needs_review)}.capture-issues li.ok{border-color:var(--complete)}
+.capture-issues span{color:var(--dim)}
+.capture-issues .refilm-tip{color:var(--text)}
+.capture-issues .refilm-tip::before{content:"Refilm: ";color:var(--walk);font-weight:600}
+.review-workspace .capture-check{margin:12px 0 0}
+@media (max-width:640px){.viewer .hint{right:auto;max-width:calc(100% - 140px);font-size:11px}}
