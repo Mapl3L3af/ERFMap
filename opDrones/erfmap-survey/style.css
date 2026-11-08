@@ -434,3 +434,13 @@ body.walking .nav, body.walking .legend { display: none; }
 .rubric-table { width: 100%; font-size: 11.5px; border-collapse: collapse; margin-top: 4px; }
 .rubric-table th, .rubric-table td { text-align: left; padding: 3px 4px; border-bottom: 1px solid var(--line); }
 .rubric-table td:not(:first-child), .rubric-table th:not(:first-child) { text-align: right; font-family: var(--mono); }
+
+/* ------------------------------------------------------------------ 3D toggles, import report */
+#walkToggles { display: none; gap: 4px; flex-shrink: 0; }
+body.walking #walkToggles { display: flex; }
+#walkToggles button { height: 30px; padding: 0 10px; font-size: 12px; border-radius: 99px; }
+#walkToggles button[aria-pressed="true"] { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+.theme-light #walkToggles button[aria-pressed="true"] { color: #2f6420; }
+.import-report ul { margin: 6px 0; padding-left: 18px; }
+.import-report li { margin: 2px 0; }
+.import-report small { color: var(--muted); }

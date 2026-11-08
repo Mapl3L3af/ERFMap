@@ -52,14 +52,44 @@ const walk = (() => {
     function column(p,r,h,c,base,topRadius=r,n=7){solid(ring(p,r,base,n),ring(p,topRadius,base+h,n),c);}
     function build(site){
         const playful=style==='stylized',bare=style==='bare';
-        vertices=[];scene=site;const tex=document.createElement('canvas');tex.width=tex.height=1024;
-        const ctx=tex.getContext('2d');ctx.scale(1024/site.w,1024/site.h);
+        vertices=[];scene=site;const tex=document.createElement('canvas'),res=typeof surveyTexture!=='undefined'&&surveyTexture.any(site)?2048:1024;tex.width=tex.height=res;
+        const ctx=tex.getContext('2d');ctx.scale(res/site.w,res/site.h);
         ctx.fillStyle=style==='realistic'?'#92957b':'#b3c97c';ctx.fillRect(0,0,site.w,site.h);
         const groundFeatures=site.features.filter(f=>(kinds[f.kind][2]==='area'&&f.kind!=='building')||['path','crossing'].includes(f.kind));
+        // Shapes in local metres; lines become ribbons so a photo can be clipped to them.
+        const outline=f=>()=>{ctx.beginPath();f.p.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));ctx.closePath();};
+        const ribbon=(f,width)=>()=>{ctx.beginPath();for(const [a,b] of edges(f.p)){const l=dist(a,b)||1,nx=-(b[1]-a[1])/l*width/2,ny=(b[0]-a[0])/l*width/2;
+            ctx.moveTo(a[0]+nx,a[1]+ny);ctx.lineTo(b[0]+nx,b[1]+ny);ctx.lineTo(b[0]-nx,b[1]-ny);ctx.lineTo(a[0]-nx,a[1]-ny);ctx.closePath();
+            ctx.moveTo(b[0]+width/2,b[1]);ctx.arc(b[0],b[1],width/2,0,2*Math.PI);}};
         for(const f of groundFeatures.sort((a,b)=>Number(kinds[a.kind][2]!=='area')-Number(kinds[b.kind][2]!=='area'))){
+            const area=kinds[f.kind][2]==='area',width=Math.max(1.1,Number(f.tagProperties?.width||1.55));
+            if(typeof surveyTexture!=='undefined'&&surveyTexture.paint(ctx,site,f,area?outline(f):ribbon(f,width)))continue;
             ctx.beginPath();f.p.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));
-            if(kinds[f.kind][2]==='area'){ctx.closePath();ctx.fillStyle=featureColor(f);ctx.fill();}
-            else{ctx.strokeStyle=featureColor(f);ctx.lineWidth=Math.max(1.1,Number(f.tagProperties?.width||1.55));ctx.lineJoin='round';ctx.stroke();}
+            if(area){ctx.closePath();ctx.fillStyle=featureColor(f);ctx.fill();}
+            else{ctx.strokeStyle=featureColor(f);ctx.lineWidth=width;ctx.lineJoin='round';ctx.stroke();}
+        }
+        // Roof photos: buildings with a texture paint their footprint so roofs can sample it.
+        const texturedRoofs=new Set();
+        for(const f of site.features.filter(f=>f.kind==='building'))
+            if(typeof surveyTexture!=='undefined'&&surveyTexture.paint(ctx,site,f,outline(f)))texturedRoofs.add(f);
+        // Relative ground contours, drawn on the terrain itself.
+        if(typeof contours!=='undefined'&&contours&&(site.samples.length||site.contours?.length)){
+            const interval=contourInterval(site);
+            ctx.save();ctx.lineCap='round';
+            for(const c of contourSegments(site,interval)){
+                const index=Math.abs(Math.round(c.height/interval))%5===0;
+                ctx.strokeStyle=index?'#3b2a17cc':'#4a3a2488';ctx.lineWidth=index?.32:.16;
+                ctx.beginPath();ctx.moveTo(...c.points[0]);ctx.lineTo(...c.points[1]);ctx.stroke();
+            }
+            ctx.restore();
+        }
+        // The selected item is outlined so it can be found while walking.
+        const chosen=typeof sel==='number'?site.features[sel]:null;
+        if(chosen){
+            ctx.save();ctx.strokeStyle='#f2a54a';ctx.lineWidth=.45;ctx.lineJoin='round';
+            if(kinds[chosen.kind][2]==='point'){ctx.beginPath();ctx.arc(chosen.p[0][0],chosen.p[0][1],1.6,0,2*Math.PI);ctx.stroke();}
+            else{ctx.beginPath();chosen.p.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));if(kinds[chosen.kind][2]==='area')ctx.closePath();ctx.stroke();}
+            ctx.restore();
         }
         // Sparse ink marks and soft contact shadows on the illustrated ground.
         const noise=i=>{const v=Math.sin(i*78.233+19.7)*43758.5453;return v-Math.floor(v);};
@@ -103,7 +133,7 @@ const walk = (() => {
             if(f.kind==='building'){
                 const shed=f.itemType==='employeeShed';
                 const base=f.p.map(q=>[...q,surface(q)-.15]), roof=Math.max(...base.map(q=>q[2]))+(+f.height||(shed?2.6:5));
-                const roofColor=featureColor(f), roofShape=shed?'Pointed':f.tagProperties?.roofShape||'Flat';
+                const roofColor=f===chosen?'#f2a54a':featureColor(f), roofShape=shed?'Pointed':f.tagProperties?.roofShape||'Flat';
                 const walls=edges(base,true);
                 const doorWall=shed?walls.reduce((best,wall)=>dist(...wall)>dist(...best)?wall:best):null;
                 for(const wall of walls){
@@ -131,7 +161,8 @@ const walk = (() => {
                         face([[x-ux,y-uy,roof-2.7],[x+ux,y+uy,roof-2.7],[x+ux,y+uy,roof-1.4],[x-ux,y-uy,roof-1.4]],playful?'#82b4bc':'#596c75');}
                     }
                 }
-                if(roofShape==='Flat')for(const patch of surfaceCells(f.p,site.w,site.h))face(patch.map(q=>[...q,roof]),roofColor);
+                if(roofShape==='Flat'&&texturedRoofs.has(f))for(const patch of surfaceCells(f.p,site.w,site.h))face(patch.map(q=>[...q,roof]),f===chosen?'#ffd9a8':'#ffffff',1,1);
+                else if(roofShape==='Flat')for(const patch of surfaceCells(f.p,site.w,site.h))face(patch.map(q=>[...q,roof]),f===chosen?'#f2a54a':roofColor);
                 else{
                     const center=f.p.reduce((sum,q)=>[sum[0]+q[0]/f.p.length,sum[1]+q[1]/f.p.length], [0,0]);
                     const peak=roof+(shed ? 0.65 : roofShape==='Pointed'?2.5:1.1);
@@ -145,7 +176,7 @@ const walk = (() => {
                     face([[a[0]+nx,a[1]+ny],[b[0]+nx,b[1]+ny],[b[0]-nx,b[1]-ny],[a[0]-nx,a[1]-ny]].map(q=>[...q,surface(q)+.035]),color);
                 }
             }else if(f.kind==='tree'){
-                const growth=Math.max(2,Math.min(40,Number(f.tagProperties?.maxGrowth||16))),size=growth/18,treeColor=featureColor(f);
+                const growth=Math.max(2,Math.min(40,Number(f.tagProperties?.maxGrowth||16))),size=growth/18,treeColor=f===chosen?'#f2a54a':featureColor(f);
                 if(bare){
                     column(p,.3,2.4*size,'#777777',z,.3,4);
                     column(p,2.3*size,3.2*size,'#aaaaaa',z+1.9*size,0,5);
@@ -382,12 +413,42 @@ const walk = (() => {
         camera.targetPitch=Math.max(-1,Math.min(.95,camera.targetPitch-(e.clientY-look[1])*.005));
         look=[e.clientX,e.clientY];wake();
     };
+    // Cast a ray from the eye through a screen point and return the item it hits.
+    function pick(clientX,clientY){
+        if(!camera||!scene||!surface)return -1;
+        const r=canvas.getBoundingClientRect(),focal=r.height*.71;
+        const sx=(clientX-r.left-r.width/2)/focal,sy=-(clientY-r.top-r.height/2)/focal;
+        const cp=Math.cos(camera.pitch),sp=Math.sin(camera.pitch),cy=Math.cos(camera.yaw),syaw=Math.sin(camera.yaw);
+        const ahead=cp-sp*sy,up=sp+cp*sy;
+        const dir=[ahead*cy-sx*syaw,ahead*syaw+sx*cy,up],len=Math.hypot(...dir);
+        const eye=[camera.x,camera.y,(camera.feet??surface([camera.x,camera.y]))+1.7];
+        const site=scene,feats=site.features;
+        const roofOf=f=>Math.max(...f.p.map(q=>surface(q)))+(+f.height||(f.itemType==='employeeShed'?2.6:5));
+        for(let t=.3;t<220;t+=.25){
+            const q=[eye[0]+dir[0]/len*t,eye[1]+dir[1]/len*t],z=eye[2]+dir[2]/len*t;
+            if(q[0]<0||q[1]<0||q[0]>site.w||q[1]>site.h)break;
+            for(let i=0;i<feats.length;i++){const f=feats[i];
+                if(f.kind==='building'&&inside(q,f.p)&&z<=roofOf(f)+.2)return i;
+                if(f.kind==='tree'){const g=Math.max(2,Math.min(40,Number(f.tagProperties?.maxGrowth||16)))/18;
+                    if(dist(q,f.p[0])<2.3*g&&z-surface(f.p[0])<5.9*g)return i;}
+                if(['bench','light','bin','bush','fountain','birdhouse','dangerSign','drainage'].includes(f.kind)&&dist(q,f.p[0])<.9&&z-surface(f.p[0])<(f.kind==='light'?4.5:1.4))return i;}
+            if(z<=surface(q)+.02){
+                const best=feats.map((f,i)=>{const g=kinds[f.kind][2];
+                    if(g==='point')return dist(q,f.p[0])<1.6?[i,0]:null;
+                    if(g==='line'){const w=Math.max(1,Number(f.tagProperties?.width||(f.kind==='roadLine'?6:1.8)))/2;return edges(f.p).some(([a,b])=>pointSegmentDistance(q,a,b)<=w)?[i,1]:null;}
+                    return inside(q,f.p)?[i,2+area(f.p)/1e6]:null;}).filter(Boolean).sort((a,b)=>a[1]-b[1])[0];
+                return best?best[0]:-1;
+            }
+        }
+        return -1;
+    }
+    function pointSegmentDistance(p,a,b){const dx=b[0]-a[0],dy=b[1]-a[1],l=dx*dx+dy*dy,t=l?Math.max(0,Math.min(1,((p[0]-a[0])*dx+(p[1]-a[1])*dy)/l)):0;return Math.hypot(p[0]-a[0]-t*dx,p[1]-a[1]-t*dy);}
     canvas.onpointerup=e=>{
         if(tap && tab==='Simulate'){
             const r=canvas.getBoundingClientRect();
             const hit=personTargets.filter(t=>Math.hypot(e.clientX-r.left-t.x,e.clientY-r.top-t.y)<=t.radius).sort((a,b)=>a.depth-b.depth)[0];
             if(hit)inspectPedestrian(hit.index);
-        }
+        }else if(tap&&typeof selectFromWalk==='function')selectFromWalk(pick(e.clientX,e.clientY));
         tap=null;look=null;
     };
     canvas.onpointercancel=()=>{tap=null;look=null;};
@@ -396,5 +457,5 @@ const walk = (() => {
         b.onpointerup=b.onpointercancel=()=>keys.delete(b.dataset.walk);
         b.onclick=e=>{if(e.detail===0&&b.dataset.walk==='jump')press('jump');};
     });
-    return {draw,startAt,state(){return camera?{x:camera.x,y:camera.y,yaw:camera.yaw,pitch:camera.pitch}:null;},invalidate(){scene=null;keys.clear();},stop(){keys.clear();cancelAnimationFrame(weatherFrame);weatherFrame=0;}};
+    return {draw,startAt,pick,state(){return camera?{x:camera.x,y:camera.y,yaw:camera.yaw,pitch:camera.pitch}:null;},invalidate(){scene=null;keys.clear();},stop(){keys.clear();cancelAnimationFrame(weatherFrame);weatherFrame=0;}};
 })();
