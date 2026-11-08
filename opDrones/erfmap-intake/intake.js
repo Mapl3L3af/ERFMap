@@ -67,13 +67,14 @@ function mountReconstruction(host, {value, save} = {}) {
 // ---------------------------------------------------------------- home
 async function home() {
     document.getElementById('newJob').hidden = true;
-    app.innerHTML = '<div class="home"><section class="upload-intro"><small class="cap">01 / OBSERVE YOUR SITE</small><h2>A healthier landscape starts here.</h2>'
+    app.innerHTML = '<div class="home"><section class="upload-intro"><small class="cap">Map from video</small><h2>Add video or photos</h2>'
         + '<p>Choose one drone video or overlapping overhead photos of the same site.</p>'
         + '<ol class="journey"><li><b>01</b> Add imagery</li><li><b>02</b> Set a distance</li><li><b>03</b> Review your map</li></ol></section>'
-        + '<section class="card upload-card"><div id="reconstructionSetup"></div><div class="drop" id="drop"><span class="upload-symbol" aria-hidden="true"></span><h3>Drop your imagery here</h3><p>One video, or photos of the same site</p><label class="button primary" tabindex="0" id="filePicker" role="button">Choose video or photos<input type="file" id="video" multiple accept="video/*,image/*,.mp4,.mov,.mkv,.avi,.webm,.mts,.jpg,.jpeg,.png,.tif,.tiff,.webp" hidden></label><p class="cap" id="uploadName"></p><div class="bar" id="uploadBar" hidden><i style="width:0"></i></div></div>'
+        + '<section class="card upload-card"><div id="reconstructionSetup"></div><div class="drop" id="drop"><h3>Drop your imagery here</h3><p>One video, or photos of the same site</p><label class="button primary" tabindex="0" id="filePicker" role="button">Choose video or photos<input type="file" id="video" multiple accept="video/*,image/*,.mp4,.mov,.mkv,.avi,.webm,.mts,.jpg,.jpeg,.png,.tif,.tiff,.webp" hidden></label><p class="cap" id="uploadName"></p><div class="bar" id="uploadBar" hidden><i style="width:0"></i></div></div>'
         + '<p id="uploadStatus" role="status"></p><p class="upload-tip">Have a known ground distance handy, such as a sidewalk width. You’ll use it to set the map’s scale.</p>'
         + '<details class="map-details"><summary>About your map</summary><p>Maps use local distances, with no GPS position or elevation. Camera angle and terrain can affect accuracy; results are not survey-grade.</p></details></section>'
         + '<section class="card capture-guide"><small class="cap">DJI Neo 2 · before you fly</small><h3>Film for a clean map</h3><ol>' + S.CAPTURE_GUIDE.map(g => '<li><b>' + esc(g.title) + '</b><span>' + esc(g.body) + '</span></li>').join('') + '</ol><p class="cap">After upload, erfMap checks your footage and tells you what to refilm.</p></section>'
+        + '<section class="recent-section"><h3>Recent flyovers</h3><ul class="jobs" id="jobs"><li>Loading flyovers…</li></ul></section>'
         + '<details class="setup-details"><summary>Processing setup</summary><div id="caps"><p>Checking the worker…</p></div></details></div>';
     uploadReconstruction = mountReconstruction(document.getElementById('reconstructionSetup'));
     const input = document.getElementById('video'), drop = document.getElementById('drop');
@@ -83,6 +84,13 @@ async function home() {
     drop.ondragleave = () => drop.classList.remove('over');
     drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); if (e.dataTransfer.files.length) upload([...e.dataTransfer.files]); };
     api('/api/intake/capabilities').then(renderCaps).catch(e => document.getElementById('caps').innerHTML = '<p class="no">' + esc(e.message) + '</p>');
+    api('/api/intake/jobs').then(list => {
+        document.getElementById('jobs').innerHTML = list.length ? list.map(j => {
+            const states = Object.values(j.stages);
+            const status = states.includes('processing') ? 'processing' : states.includes('failed') ? 'failed' : j.stages.review === 'complete' ? 'complete' : states.includes('needs_review') ? 'needs_review' : 'queued';
+            return '<li>' + chip(status) + '<a href="?job=' + j.id + '">' + esc(j.name) + '</a><span class="cap">' + new Date(j.createdAt).toLocaleString() + '</span></li>';
+        }).join('') : '<li class="empty-jobs">Your flyovers will appear here once you add imagery.</li>';
+    }).catch(() => { document.getElementById('jobs').innerHTML = '<li class="empty-jobs">Could not load recent flyovers.</li>'; });
 }
 function renderCaps(c) {
     const row = (name, ok, text, optional) => '<li><b>' + name + '</b><span class="' + (ok ? 'ok' : optional ? 'opt' : 'no') + '">' + (ok ? '✓ ' : optional ? '○ ' : '✗ ') + esc(text) + '</span></li>';
