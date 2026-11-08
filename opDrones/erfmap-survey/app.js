@@ -82,7 +82,10 @@ const points = p => p.map(q => q.join(',')).join(' ');
 const poly = (p, fill, stroke = '#647660', extra = '') => '<polygon points="' + points(p) + '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="1" ' + extra + '/>';
 const line = (p, c, w = 1, extra = '') => '<polyline points="' + points(p) + '" fill="none" stroke="' + c + '" stroke-width="' + w + '" stroke-linejoin="round" stroke-linecap="round" ' + extra + '/>';
 const circle = (p, r, c, s = 'none', extra = '') => '<circle cx="' + p[0] + '" cy="' + p[1] + '" r="' + r + '" fill="' + c + '" stroke="' + s + '" ' + extra + '/>';
-const label = (p, s, size = 10) => '<text x="' + p[0] + '" y="' + p[1] + '" text-anchor="middle" font-size="' + size + '" fill="#354638" stroke="#f5f5e9" stroke-width="3" paint-order="stroke">' + esc(s) + '</text>';
+const chrome = () => document.body.classList.contains('theme-light')
+    ? { ground:'#f6f8f8', edge:'#798c96', hatch:'#e1e6e9', hatchLine:'#93a2ad', labelInk:'#354638', labelHalo:'#f5f5e9' }
+    : { ground:'#1f2622', edge:'#6f8580', hatch:'#2b3330', hatchLine:'#56645f', labelInk:'#eef3e6', labelHalo:'#141816' };
+const label = (p, s, size = 10) => '<text x="' + p[0] + '" y="' + p[1] + '" text-anchor="middle" font-size="' + size + '" fill="'+chrome().labelInk+'" stroke="'+chrome().labelHalo+'" stroke-width="3" paint-order="stroke">' + esc(s) + '</text>';
 function feature(f, i) {
     const p = f.p.map(q => project(q)), c = featureColor(f), selected = i === sel && !view3;
     let s = '';
@@ -198,13 +201,13 @@ function draw() {
     const W = svg.clientWidth, H = svg.clientHeight;
     if (!W)
         return;
-    const compact=W<750, sidebar=folded||compact?0:315;
-    const detailDock=compact && !folded && (tab==='Simulate' || (tab==='Analyse' && analysisTool==='Real Paths (Desire Paths)'));
-    const topInset=compact?154:164, bottomInset=detailDock?Math.min(H*.41,310)+24:compact?82:88;
+    const compact=W<750, sidebar=folded||compact?0:352;
+    const sheet=Math.min(innerHeight*.52,440)+12;
+    const topInset=compact?120:84, bottomInset=compact&&!folded?sheet:compact?84:112;
     cx=(W+sidebar)/2+offset[0];cy=(H+topInset-bottomInset)/2+offset[1];
     scale=zoom*Math.min(Math.max(80,W-sidebar-66)/site.w,Math.max(80,H-topInset-bottomInset)/site.h);
-    let s='<defs><pattern id="hatch" patternUnits="userSpaceOnUse" width="6" height="6"><rect width="6" height="6" fill="#e1e6e9"/><path d="M-1 1L1 -1M0 6L6 0M5 7L7 5" stroke="#93a2ad" stroke-width=".8"/></pattern><radialGradient id="orb"><stop stop-color="#ffd88a"/><stop offset="1" stop-color="#e07c39"/></radialGradient></defs>';
-    s += poly(rect(0,0,site.w,site.h).map(q=>project(q)),'#f6f8f8','#798c96','stroke-dasharray="5 3"');
+    let s='<defs><pattern id="hatch" patternUnits="userSpaceOnUse" width="6" height="6"><rect width="6" height="6" fill="'+chrome().hatch+'"/><path d="M-1 1L1 -1M0 6L6 0M5 7L7 5" stroke="'+chrome().hatchLine+'" stroke-width=".8"/></pattern><radialGradient id="orb"><stop stop-color="#ffd88a"/><stop offset="1" stop-color="#e07c39"/></radialGradient></defs>';
+    s += poly(rect(0,0,site.w,site.h).map(q=>project(q)),chrome().ground,chrome().edge,'stroke-dasharray="5 3"');
     const top=project([site.w/2,0]);
     s+=label([top[0],top[1]-10],n(site.w)+' m  ·  E–W');
     s+=label(project([site.w/2,site.h+15/scale]),n(site.h)+' m  ·  N–S');

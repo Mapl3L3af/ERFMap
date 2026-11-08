@@ -23,7 +23,7 @@ survey.addEventListener('pointerleave', centerLook);
 
 
 [
-  ['New Flyover', 23, 24], ['Open Project', 72, 21],
+  ['Map from Video', 23, 24], ['Open Project', 72, 21],
   ['Join Project', 28, 72], ['Info', 77, 68]
 ].forEach(([name, left, top], i) => {
   const button = document.createElement('button');
@@ -34,8 +34,8 @@ survey.addEventListener('pointerleave', centerLook);
     if (entering) return;
     if (name === 'Open Project') document.querySelector('#projectFile').click();
     if (name === 'Join Project') document.querySelector('#joinDialog').showModal();
-    if (name === 'New Flyover') location.assign('/intake/');
-    if (name === 'Info') statusLine.textContent = 'Start a new flyover to turn drone video into a locally scaled map, open a saved JSON file, or join a teammate with their four digit code.';
+    if (name === 'Map from Video') location.assign('/intake/');
+    if (name === 'Info') statusLine.textContent = 'Map from Video turns drone video or photos into a locally scaled site map you can review, correct and export. Open Project loads a saved JSON file, and Join Project connects you to a teammate with their four digit code.';
   };
   nav.append(button);
 });

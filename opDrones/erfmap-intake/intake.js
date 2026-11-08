@@ -25,7 +25,7 @@ const pct = v => v == null ? '—' : Math.round(v * 100) + '%';
 // ---------------------------------------------------------------- home
 async function home() {
     document.getElementById('newJob').hidden = true;
-    app.innerHTML = '<div class="home"><section class="upload-intro"><small class="cap">New flyover</small><h2>Add video or photos</h2>'
+    app.innerHTML = '<div class="home"><section class="upload-intro"><small class="cap">Map from video</small><h2>Add video or photos</h2>'
         + '<p>Choose one drone video or overlapping overhead photos of the same site.</p>'
         + '<ol class="journey"><li><b>01</b> Add imagery</li><li><b>02</b> Set a distance</li><li><b>03</b> Review your map</li></ol></section>'
         + '<section class="card upload-card"><div class="drop" id="drop"><h3>Drop your imagery here</h3><p>One video, or photos of the same site</p><label class="button primary" tabindex="0" id="filePicker">Choose video or photos<input type="file" id="video" multiple accept="video/*,image/*,.mp4,.mov,.mkv,.avi,.webm,.mts,.jpg,.jpeg,.png,.tif,.tiff,.webp" hidden></label><p class="cap" id="uploadName"></p><div class="bar" id="uploadBar" hidden><i style="width:0"></i></div></div>'
@@ -461,7 +461,7 @@ async function viewMerging(body, data) {
         document.getElementById('glist').innerHTML = data.merged.map(g => '<div data-pick="' + g.id + '" aria-selected="' + (g.id === active) + '"><b>' + g.id + '</b> ' + esc(label(g.kind).label) + (g.confidence != null ? ' · ' + pct(g.confidence) : '') + '<br><span class="cap">' + g.members.length + ' detections · ' + g.frames.length + ' frames' + (g.mean_iou != null ? ' · mean IoU ' + g.mean_iou : '') + '</span><br>' + flags(g.flags, ['conflicting', 'geometry'])).join('');
         draw();
     };
-    document.getElementById('glist').onclick = e => { const p = e.target.closest('[data-pick]'); if (!p) return; active = p.dataset.pick; const g = data.merged.find(x => x.id === active); const xs = g.polygon.map(q => q[0]), ys = g.polygon.map(q => q[1]); v.focus(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys), 2); list(); };
+    document.getElementById('glist').onclick = e => { const p = e.target.closest('[data-pick]'); if (!p) return; active = p.dataset.pick; const g = data.merged.find(x => x.id === active); const xs = g.polygon.map(q => q[0]), ys = g.polygon.map(q => q[1]); v.focus(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys), 2.5, v.contextSize(25 / data.scale.m_per_px)); list(); };
     v.onClick = (p, target) => { const hit = target.closest?.('[data-g]'); if (hit) { active = hit.dataset.g; list(); } };
     list();
 }
@@ -553,9 +553,9 @@ async function viewReview(body, payload) {
         + '<nav class="review-tabs" aria-label="Review panels"><button type="button" data-review-tab="review" aria-pressed="true">Review</button><button type="button" data-review-tab="features" aria-pressed="false">Justify</button><button type="button" data-review-tab="export" aria-pressed="false">Export</button></nav>'
         + '<section data-review-panel="review"><div class="note warn">Only accepted features are imported. Amber dashed outlines are pending; solid outlines are accepted.</div>' + toolbar
         + '<p>Review each feature in Justify. Choose Yes to accept it or No to reject it and continue.</p><p id="reviewCounts" class="cap"></p></section>'
-        + '<section data-review-panel="features" hidden><h2>Feature properties</h2><p class="review-help">Is this feature correct? Review its properties, then choose Yes or No to submit and continue.</p><button type="button" id="acceptAll">Accept all</button><div class="review-table"><table><tbody id="rows"></tbody></table></div></section>'
+        + '<section data-review-panel="features" hidden><h2>Feature properties</h2><p class="review-help">Is this feature correct? Review its properties, then choose Yes or No to submit and continue.</p><button type="button" id="acceptAll">Accept all</button><div class="review-table"><table><tbody id="rows"></tbody></table></div><h3 class="review-list-title">Still to review <span class="cap" id="reviewListCount"></span></h3><p class="review-help">Pick any feature to jump to it on the map.</p><div class="review-list" id="reviewList" role="list"></div></section>'
         + '<section data-review-panel="export" hidden><h2>Export</h2><div class="export"><section id="exportScenario"></section><section id="export3d"></section></div></section></div></aside></section>';
-    const v = viewer = mapView(document.getElementById('rmap'), geometry, () => features().filter(f => reviewPanel !== 'features' || f.id === active), {editable: phase !== 'ready' || !staged, active: () => active, shadows: () => shadows,
+    const v = viewer = mapView(document.getElementById('rmap'), geometry, () => features().filter(f => reviewPanel !== 'features' || f.id === active || (visible(f) && f.status === 'proposed')), {editable: phase !== 'ready' || !staged, active: () => active, shadows: () => shadows,
         overlay: (toPx, k) => {
             let markup = outline.length ? '<polyline points="' + pts(outline.map(toPx)) + '" fill="none" stroke="#fff" stroke-width="2" vector-effect="non-scaling-stroke"/>' : '';
             for (const m of marks) { if (m.outline) { markup += '<polygon points="' + pts(m.outline.map(toPx)) + '" fill="none" stroke="' + label(m.kind).color + '" stroke-width="2" vector-effect="non-scaling-stroke"/>'; continue; } if (m.stroke) { markup += '<polyline points="' + pts(m.stroke.map(toPx)) + '" fill="none" stroke="' + (m.kind === 'shadow' ? '#bc67cf' : label(m.kind).color) + '" stroke-width="' + (2 * m.radius / geometry.scale.m_per_px) + '" stroke-linecap="round" stroke-linejoin="round" opacity=".6" pointer-events="none"/>'; continue; } const q = toPx(m.p); markup += '<circle cx="' + q[0] + '" cy="' + q[1] + '" r="' + 6 * k + '" fill="' + (m.kind === 'shadow' ? '#bc67cf' : label(m.kind).color) + '" stroke="#fff" stroke-width="2" vector-effect="non-scaling-stroke" pointer-events="none"/>'; }
@@ -590,6 +590,8 @@ async function viewReview(body, payload) {
         document.getElementById('rstatus').textContent = submitting ? 'Submitting decision…' : next ? 'Review ' + next.name + ' · ' + pending.length + ' remaining' : 'All features in this step have been reviewed.';
         if (submitting) body.querySelectorAll('[data-edit], [data-status]').forEach(el => { el.disabled = true; });
         const list = features().filter(visible);
+        document.getElementById('reviewListCount').textContent = pending.length ? pending.length + ' left' : '';
+        document.getElementById('reviewList').innerHTML = pending.map(f => '<button type="button" role="listitem" data-feature="' + esc(f.id) + '" aria-current="' + (f.id === active) + '"><i style="background:' + label(f.kind).color + '"></i><span><b>' + esc(f.name) + '</b><small>' + esc(f.id) + ' · ' + esc(label(f.kind).label) + ' · ' + (f.size.area_m2 != null ? '≈ ' + f.size.area_m2 + ' m²' : f.size.length_m != null ? '≈ ' + f.size.length_m + ' m' : 'point') + (f.confidence != null ? ' · ' + pct(f.confidence) : '') + '</small></span></button>').join('') || '<p class="cap">Nothing left in this step.</p>';
         document.getElementById('reviewCounts').textContent = list.filter(f => f.status === 'accepted').length + ' accepted · ' + list.filter(f => f.status === 'proposed').length + ' pending · ' + list.filter(f => f.status === 'rejected').length + ' rejected';
         if (staged && phase === 'ready') body.querySelectorAll('[data-edit], [data-status], #acceptLabelled').forEach(el => { el.disabled = true; });
         if (document.getElementById('markCount')) document.getElementById('markCount').textContent = marks.length + ' correction(s)';
@@ -631,7 +633,7 @@ async function viewReview(body, payload) {
                 + '<p><a class="button primary" href="/api/intake/jobs/' + job.id + '/model.glb">Download .glb</a></p>';
         } catch (e) { panel.innerHTML = '<div class="note err">' + esc(e.message) + '</div>'; }
     }
-    const focusFeature = id => { const f = features().find(x => x.id === id); const p = f.p.map(v.toPx); const xs = p.map(q => q[0]), ys = p.map(q => q[1]); v.ensureVisible(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)); };
+    const focusFeature = id => { const f = features().find(x => x.id === id); const p = f.p.map(v.toPx); const xs = p.map(q => q[0]), ys = p.map(q => q[1]); v.focus(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys), 2.5, v.contextSize(25 / geometry.scale.m_per_px)); };
     body.addEventListener('change', e => {
         if (busy || submitting) return;
         if (e.target.id === 'clickMode') { v.panOnly = false; body.querySelector('[data-map="pan"]').setAttribute('aria-pressed', 'false'); body.querySelector('[data-map="select"]').setAttribute('aria-pressed', 'true'); outline = []; clickMode = e.target.value; active = null; refresh(); return; }
