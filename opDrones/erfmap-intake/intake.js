@@ -583,10 +583,10 @@ async function viewReview(body, payload) {
         const list = features().filter(visible);
         document.getElementById('rows').innerHTML = list.map(f => '<li data-row="' + f.id + '" class="' + f.status + (f.id === active ? ' current' : '') + '" aria-selected="' + (f.id === active) + '">'
             + '<i class="swatch" style="background:' + label(f.kind).color + '"></i>'
-            + '<span class="item"><b>' + esc(f.name) + '</b><small>' + esc(label(f.kind).label) + (f.confidence != null ? ' · ' + pct(f.confidence) + ' sure' : '') + (f.size?.area_m2 != null ? ' · ≈ ' + f.size.area_m2 + ' m²' : '') + '</small>'
+            + '<span class="item"><b><span class="tag">' + esc(f.id) + '</span> ' + esc(label(f.kind).label) + '</b><small>' + esc([f.name && f.name !== label(f.kind).label ? f.name : '', f.confidence != null ? pct(f.confidence) + ' sure' : '', f.size?.area_m2 != null ? '≈ ' + f.size.area_m2 + ' m²' : ''].filter(Boolean).join(' · ')) + '</small>'
             + '<select data-edit="kind" data-id="' + f.id + '" aria-label="Type of ' + esc(f.name) + '">' + kindOptions(f.kind) + '</select></span>'
-            + '<span class="decide"><button type="button" data-status="accepted" data-id="' + f.id + '" class="keep' + (f.status === 'accepted' ? ' on' : '') + '" aria-pressed="' + (f.status === 'accepted') + '">✓ Keep</button>'
-            + '<button type="button" data-status="rejected" data-id="' + f.id + '" class="drop-item' + (f.status === 'rejected' ? ' on' : '') + '" aria-pressed="' + (f.status === 'rejected') + '">✕ Remove</button></span></li>').join('')
+            + '<span class="decide"><button type="button" data-status="accepted" data-id="' + f.id + '" class="keep' + (f.status === 'accepted' ? ' on' : '') + '" aria-pressed="' + (f.status === 'accepted') + '">✓ Keep ' + esc(f.id) + '</button>'
+            + '<button type="button" data-status="rejected" data-id="' + f.id + '" class="drop-item' + (f.status === 'rejected' ? ' on' : '') + '" aria-pressed="' + (f.status === 'rejected') + '">✕ Remove ' + esc(f.id) + '</button></span></li>').join('')
             || '<li class="empty">Nothing to check in this step.</li>';
     };
     function refresh() {

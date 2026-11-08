@@ -227,3 +227,4 @@ header .brand{color:var(--accent)}
 .step-actions{display:flex;flex-direction:column;gap:6px;margin-top:10px}
 .step-actions .primary{font-weight:bold;padding:9px;background:var(--accent);color:#111;border-color:var(--accent)}
 .step-actions .primary:disabled{background:#2a2a2a;color:var(--dim);border-color:var(--line);cursor:not-allowed}
+.review-checklist .tag{display:inline-block;font-family:ui-monospace,Menlo,monospace;font-size:12px;background:#000;color:#fff;border:1px solid #666;border-radius:4px;padding:0 5px;margin-right:2px}
