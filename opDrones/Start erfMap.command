@@ -26,7 +26,7 @@ if [[ -z "${ERFMAP_PYTHON:-}" ]]; then
         fi
     done
     if [[ -z "$python_cmd" ]]; then
-        print 'Install Python 3.10 or later to prepare image processing and reconstruction support.'
+        print 'Install Python 3.10 or later to prepare image processing support.'
         exit 1
     fi
 
@@ -38,8 +38,8 @@ if [[ -z "${ERFMAP_PYTHON:-}" ]]; then
 
     requirements_hash="$(shasum -a 256 worker/requirements.txt | cut -d ' ' -f 1)"
     stamp="$PWD/.venv/.erfmap-requirements.sha256"
-    if [[ ! -f "$stamp" || "$(<"$stamp")" != "$requirements_hash" ]] || ! "$venv_python" -c 'import cv2, numpy, rasterio' 2>/dev/null; then
-        print 'Preparing image processing and NodeODM reconstruction dependencies…'
+    if [[ ! -f "$stamp" || "$(<"$stamp")" != "$requirements_hash" ]] || ! "$venv_python" -c 'import cv2, numpy' 2>/dev/null; then
+        print 'Preparing image processing dependencies…'
         "$venv_python" -m pip install -r worker/requirements.txt || { print 'Dependency setup failed. Check the network and Python package installer, then retry.'; exit 1; }
         print -r -- "$requirements_hash" > "$stamp"
     fi

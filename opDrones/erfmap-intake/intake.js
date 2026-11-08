@@ -22,61 +22,18 @@ const label = kind => labels.find(l => l.kind === kind) || {label: kind || 'Unla
 const pts = p => p.map(q => q.map(v => +v.toFixed(2)).join(',')).join(' ');
 const pct = v => v == null ? '—' : Math.round(v * 100) + '%';
 
-function mountReconstruction(host, {value, save} = {}) {
-    const detail = document.createElement('details');
-    detail.id = 'reconstruction'; detail.className = 'map-details';
-    detail.innerHTML = '<summary>Optional · Photogrammetry setup</summary>'
-        + '<p><label><input type="checkbox" data-enable> Use NodeODM for this flyover</label></p>'
-        + '<div data-fields hidden><p><label>NodeODM service URL <input type="url" data-url value="http://127.0.0.1:3001" placeholder="http://127.0.0.1:3001"></label></p>'
-        + '<p><label><input type="checkbox" data-building> Request a full 3D building model</label></p>'
-        + '<p>Include overlapping photos of the roofs and building sides for a building model. The selected service receives your original photos when processing starts.</p>'
-        + '<p>erfMap uses the orthophoto and terrain. Detailed building meshes stay in the downloadable photogrammetry files; they are not displayed in the survey.</p>'
-        + '<button type="button" data-check>Check connection</button></div>'
-        + '<p><a href="/info.html#reconstruction">Photo requirements and engine setup ↗</a></p>'
-        + (save ? '<button type="button" data-save>Save setup &amp; rebuild imagery</button><p>Rebuilding replaces scale calibration, detected features and their review decisions.</p>' : '')
-        + '<p data-status role="status"></p>';
-    host.append(detail);
-    const q = selector => detail.querySelector(selector);
-    q('[data-enable]').checked = value?.enabled === true;
-    q('[data-url]').value = value?.url || 'http://127.0.0.1:3001';
-    q('[data-building]').checked = value?.buildingModel === true;
-    const toggle = () => { q('[data-fields]').hidden = !q('[data-enable]').checked; };
-    q('[data-enable]').onchange = toggle; toggle();
-    const read = () => {
-        if (!q('[data-enable]').checked) return {enabled:false};
-        if (!q('[data-url]').reportValidity() || !q('[data-url]').value) throw Error('Enter the NodeODM service URL.');
-        return {enabled:true, url:q('[data-url]').value.trim(), buildingModel:q('[data-building]').checked};
-    };
-    q('[data-check]').onclick = async () => {
-        q('[data-check]').disabled = true; q('[data-status]').textContent = 'Checking NodeODM…';
-        try {
-            const result = await api('/api/intake/reconstruction-check', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(read())});
-            q('[data-status]').textContent = result.ready ? 'ODM '+result.version+' is ready'+(result.maxImages ? ' · up to '+result.maxImages+' photos' : '')+'.' : 'Photogrammetry is off.';
-        } catch (error) { q('[data-status]').textContent = error.message; }
-        finally { q('[data-check]').disabled = false; }
-    };
-    if (save) q('[data-save]').onclick = async () => {
-        q('[data-save]').disabled = true;
-        try { await save(read()); } catch (error) { q('[data-status]').textContent = error.message; }
-        finally { q('[data-save]').disabled = false; }
-    };
-    if (location.hash === '#reconstruction') detail.open = true;
-    return {read};
-}
-
 // ---------------------------------------------------------------- home
 async function home() {
     document.getElementById('newJob').hidden = true;
     app.innerHTML = '<div class="home"><section class="upload-intro"><small class="cap">Map from video</small><h2>Add video or photos</h2>'
         + '<p>Choose one drone video or overlapping overhead photos of the same site.</p>'
         + '<ol class="journey"><li><b>01</b> Add imagery</li><li><b>02</b> Set a distance</li><li><b>03</b> Review your map</li></ol></section>'
-        + '<section class="card upload-card"><div id="reconstructionSetup"></div><div class="drop" id="drop"><h3>Drop your imagery here</h3><p>One video, or photos of the same site</p><label class="button primary" tabindex="0" id="filePicker" role="button">Choose video or photos<input type="file" id="video" multiple accept="video/*,image/*,.mp4,.mov,.mkv,.avi,.webm,.mts,.jpg,.jpeg,.png,.tif,.tiff,.webp" hidden></label><p class="cap" id="uploadName"></p><div class="bar" id="uploadBar" hidden><i style="width:0"></i></div></div>'
+        + '<section class="card upload-card"><div class="drop" id="drop"><h3>Drop your imagery here</h3><p>One video, or photos of the same site</p><label class="button primary" tabindex="0" id="filePicker" role="button">Choose video or photos<input type="file" id="video" multiple accept="video/*,image/*,.mp4,.mov,.mkv,.avi,.webm,.mts,.jpg,.jpeg,.png,.tif,.tiff,.webp" hidden></label><p class="cap" id="uploadName"></p><div class="bar" id="uploadBar" hidden><i style="width:0"></i></div></div>'
         + '<p id="uploadStatus" role="status"></p><p class="upload-tip">Have a known ground distance handy, such as a sidewalk width. You’ll use it to set the map’s scale.</p>'
         + '<details class="map-details"><summary>About your map</summary><p>Maps use local distances, with no GPS position or elevation. Camera angle and terrain can affect accuracy; results are not survey-grade.</p></details></section>'
         + '<section class="card capture-guide"><small class="cap">DJI Neo 2 · before you fly</small><h3>Film for a clean map</h3><ol>' + S.CAPTURE_GUIDE.map(g => '<li><b>' + esc(g.title) + '</b><span>' + esc(g.body) + '</span></li>').join('') + '</ol><p class="cap">After upload, erfMap checks your footage and tells you what to refilm.</p></section>'
         + '<section class="recent-section"><h3>Recent flyovers</h3><ul class="jobs" id="jobs"><li>Loading flyovers…</li></ul></section>'
         + '<details class="setup-details"><summary>Processing setup</summary><div id="caps"><p>Checking the worker…</p></div></details></div>';
-    uploadReconstruction = mountReconstruction(document.getElementById('reconstructionSetup'));
     const input = document.getElementById('video'), drop = document.getElementById('drop');
     document.getElementById('filePicker').onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } };
     input.onchange = () => input.files.length && upload([...input.files]);
@@ -124,7 +81,7 @@ function send(url, file, onProgress) {
 }
 let capturePinned = false;
 let referencePinned = false;
-let uploading = false, uploadReconstruction = null;
+let uploading = false;
 async function upload(files) {
     if (uploading || !files.length) return;
     const bar = document.getElementById('uploadBar'), status = document.getElementById('uploadStatus');
@@ -134,10 +91,6 @@ async function upload(files) {
     if (videos.length && photos.length || videos.length > 1 || videos.length + photos.length !== files.length) {
         status.textContent = 'Choose either one video, or one or more photos (JPEG, PNG, TIFF or WebP).'; return;
     }
-    let reconstruction;
-    try { reconstruction = uploadReconstruction.read(); } catch (error) { status.textContent = error.message; return; }
-    if (reconstruction.enabled && (videos.length || photos.length < 3)) { status.textContent = 'Photogrammetry needs at least three overlapping original photographs.'; return; }
-    const setupQuery = reconstruction.enabled ? '&photogrammetry=1&nodeodm_url=' + encodeURIComponent(reconstruction.url) + (reconstruction.buildingModel ? '&building_model=1' : '') : '';
     const list = videos.length ? videos : photos, total = list.reduce((s, f) => s + f.size, 0);
     document.getElementById('uploadName').textContent = (videos.length ? list[0].name : list.length + ' photo' + (list.length > 1 ? 's' : '')) + ' · ' + (total / 1048576).toFixed(1) + ' MB';
     uploading = true;
@@ -149,7 +102,7 @@ async function upload(files) {
     const progress = loaded => { bar.firstElementChild.style.width = (total ? 100 * (done + loaded) / total : 0) + '%'; };
     try {
         status.textContent = 'Uploading… originals are kept unchanged.';
-        const created = await send('/api/intake/jobs?name=' + encodeURIComponent(list[0].name) + (photos.length ? '&defer=1' : '') + setupQuery, list[0], progress);
+        const created = await send('/api/intake/jobs?name=' + encodeURIComponent(list[0].name) + (photos.length ? '&defer=1' : ''), list[0], progress);
         done += list[0].size;
         for (const [i, file] of list.slice(1).entries()) {
             status.textContent = 'Uploading photo ' + (i + 2) + ' of ' + list.length + '…';
@@ -186,13 +139,6 @@ function update(next) {
         document.getElementById('original').innerHTML = job.media === 'photos'
             ? '<small class="cap">Original photos (kept unchanged)</small><p>' + originals.length + ' photo' + (originals.length > 1 ? 's' : '') + ' · ' + (originals.reduce((s, o) => s + o.size, 0) / 1048576).toFixed(1) + ' MB</p><details><summary>Files</summary><ul>' + originals.map(o => '<li><a href="' + fileUrl(o.path) + '" download>' + esc(o.name) + '</a></li>').join('') + '</ul></details>'
             : '<small class="cap">Original video (kept unchanged)</small><p>' + esc(job.original.name) + '<br><span class="cap">' + (job.original.size / 1048576).toFixed(1) + ' MB · uploaded ' + new Date(job.createdAt).toLocaleString() + '</span></p><a class="button" href="' + fileUrl(job.original.path) + '" download>Download original</a>';
-    }
-    const archiveReady = job.reconstruction?.enabled && ['complete','needs_review'].includes(job.stages.correction.status);
-    if (!archiveReady) document.getElementById('reconstructionDownload')?.remove();
-    if (archiveReady && !document.getElementById('reconstructionDownload')) {
-        const download=document.createElement('p');download.id='reconstructionDownload';
-        download.innerHTML='<a href="'+fileUrl('nodeodm-all.zip')+'" download>Download photogrammetry files (ZIP)</a>';
-        document.getElementById('original').append(download);
     }
     // Keep one workspace open, moving from reference line to processing to review.
     const unlocked = (job.calibration?.references || []).some(r => r.confirmed !== false);
@@ -332,9 +278,9 @@ function viewCapture(body, data) {
         return;
     }
     const images = data.images || [], usable = images.filter(i => !i.excluded).length;
-    const readiness = {ready: 'Ready for processing', needs_review: 'Review capture warnings', blocked: 'Multi-view reconstruction blocked'}[data.readiness];
+    const readiness = {ready: 'Ready for processing', needs_review: 'Review capture warnings', blocked: 'Too few usable views'}[data.readiness];
     body.innerHTML = '<h3>' + esc(readiness) + '</h3><ul>' + (data.reasons || []).map(r => '<li>' + esc(r) + '</li>').join('') + '</ul>'
-        + '<p>These checks run before map processing. '+(job.reconstruction?.enabled ? 'NodeODM photogrammetry is enabled for this flyover. These planar checks do not verify building-side coverage.' : 'Photogrammetry is off for this flyover.')+' Original uploads are preserved.</p>'
+        + '<p>These checks run before map processing. Original uploads are preserved.</p>'
         + (job.captureReview ? '<p class="note">Report acknowledged for 2D mapping at ' + esc(new Date(job.captureReview.at).toLocaleString()) + '.</p>' : data.readiness !== 'ready' ? '<p>Review the images below. You can start a new flyover with additional connecting or replacement photos, or acknowledge the limitations and continue with the current 2D pipeline.</p><button type="button" class="primary" id="continueCapture"' + (usable ? '' : ' disabled') + '>'+(job.reconstruction?.enabled ? 'Continue with photogrammetry' : 'Continue with 2D mapping')+'</button>' : '')
         + '<p><button type="button" id="returnCapture">Return to workflow</button> <a class="button" href="/api/intake/jobs/' + job.id + '/stages/capture" download="capture-report.json">Download report JSON</a> <a class="button" href="/intake/">New flyover</a></p>'
         + '<h3>Image quality and overlap</h3><p class="cap">Quality scores use a maximum analysis side of ' + data.settings.analysis_side + ' px. Sharpness threshold: ' + data.settings.sharpness_min + '; texture threshold: ' + data.settings.texture_min + '. Overlap target: ' + pct(data.settings.overlap_target) + '. Overlap is a planar footprint estimate, not a raw match count.</p>'
@@ -348,7 +294,7 @@ function viewCapture(body, data) {
     if (button) button.onclick = async () => {
         button.disabled = true;
         try {
-            const next = await api('/api/intake/jobs/' + job.id + '/capture-review', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: job.reconstruction?.enabled ? 'continue-reconstruction' : 'continue-2d'})});
+            const next = await api('/api/intake/jobs/' + job.id + '/capture-review', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: 'continue-2d'})});
             capturePinned = false;
             update(next);
         } catch (error) { button.disabled = false; alert(error.message); }
@@ -538,10 +484,6 @@ async function viewMarkers(body, data) {
         for(const stage of ['regions','classification','merging','geometry'])delete results[stage];
         referencePinned=false;
         update(next);
-    }});
-    mountReconstruction(body, {value:job.reconstruction, save:async config=>{
-        const next=await api('/api/intake/jobs/'+job.id+'/reconstruction',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(config)});
-        results={}; shown={}; referencePinned=false; update(next); renderPanel();
     }});
     if(referencePinned){const back=document.createElement('button');back.type='button';back.textContent='Return to workflow';back.onclick=()=>{referencePinned=false;update(job);renderPanel();};body.prepend(back);}
 }

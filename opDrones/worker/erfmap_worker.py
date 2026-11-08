@@ -176,7 +176,7 @@ def capabilities():
         'opencv': cv2.__version__ if cv2 is not None else None,
         'segmenter': zones_command(),
         'classifier': classifier_command(),
-        'reconstructor': bool(os.environ.get('ERFMAP_RECONSTRUCTOR') or os.environ.get('ERFMAP_NODEODM_URL')),
+        'reconstructor': bool(os.environ.get('ERFMAP_RECONSTRUCTOR')),
     }
 
 
@@ -406,8 +406,7 @@ def stage_frames(job):
         out = stage_dir(job, 'frames')
         for old in out.glob('f*.jpg'):
             old.unlink()
-        config = (read_json(Path(job) / 'job.json') or {}).get('reconstruction') or {}
-        return score_frames(photo_frames(job, out), None, allow_oblique=config.get('enabled', False))
+        return score_frames(photo_frames(job, out), None)
     ffmpeg = tool('ffmpeg')
     if not ffmpeg:
         raise Unavailable('FFmpeg was not found on PATH. Install FFmpeg or set ERFMAP_FFMPEG.')
@@ -521,10 +520,6 @@ def stage_correction(job):
     out = stage_dir(job, 'correction')
     meta = read_json(Path(job) / 'job.json') or {}
     sheet = meta.get('media') == 'photos' and meta.get('sceneMode') != 'stitched'
-    if os.environ.get('ERFMAP_NODEODM_URL') and not os.environ.get('ERFMAP_RECONSTRUCTOR') and not sheet:
-        from nodeodm_adapter import orthophoto_stage
-        progress(.05, 'Reconstructing ODM orthophoto before calibration and labeling')
-        return orthophoto_stage({'job': str(Path(job).resolve()), 'frames': stage_result(job, 'frames')})
     camera = read_json(Path(job) / 'camera.json')
     lens = {'status': 'unavailable', 'reason': 'No camera calibration supplied (camera.json with fx, fy, cx, cy and distortion coefficients). Frames are not lens-corrected.'}
     K = D = None
@@ -895,7 +890,7 @@ def stage_markers(job):
 # ---------------------------------------------------------------- 4. regions
 def keyframes(job, limit=None):
     corr = stage_result(job, 'correction')
-    if corr.get('mosaic', {}).get('source') == 'NodeODM' or (read_json(Path(job) / 'job.json') or {}).get('sceneMode') == 'stitched':
+    if (read_json(Path(job) / 'job.json') or {}).get('sceneMode') == 'stitched':
         m = corr['mosaic']
         return [{'id': 'scene', 'after': m['image'], 'width': m['width'], 'height': m['height'], 'to_mosaic': np.eye(3).tolist()}]
     frames = [f for f in corr['frames'] if 'to_mosaic' in f]
@@ -1426,8 +1421,6 @@ def stage_geometry(job):
     m_per_px = float(np.median(estimates))
     spread = float(np.std(estimates) / m_per_px) if len(estimates) > 1 else None
     warnings = ['Locally scaled, unreferenced: coordinates are metres from an arbitrary origin, axes follow the reference frame (not north), and perspective, terrain and lens effects are not removed.']
-    if merged['mosaic'].get('source') == 'NodeODM':
-        warnings = ['ODM orthophoto with confirmed local scale. Export coordinates are local metres; survey accuracy and vertical alignment require independent control.']
     if len(estimates) == 1:
         warnings.append('Only one scale reference is confirmed. Scale is reliable near it only; distances far from it may be off.')
     if spread is not None and spread > 0.1:
@@ -1490,18 +1483,14 @@ def run(stage, job):
         result['captureProfile'] = job_capture(job)
         if stage == 'geometry' and result.get('scale') and result.get('mosaic'):
             command = os.environ.get('ERFMAP_RECONSTRUCTOR')
-            if command or os.environ.get('ERFMAP_NODEODM_URL'):
+            if command:
                 from terrain import build_terrain
                 progress(.9, 'Reconstructing ground elevation')
                 payload = {'job': str(Path(job).resolve()), 'captureProfile': job_capture(job),
                     'frames': stage_result(job, 'frames'), 'correction': stage_result(job, 'correction'),
                     'calibration': read_json(Path(job) / 'calibration.json', {}),
                     'scale': result['scale'], 'mosaic': result['mosaic']}
-                if command:
-                    terrain_data = external(command, payload, 'Reconstruction')
-                else:
-                    from nodeodm_adapter import run as run_nodeodm
-                    terrain_data = run_nodeodm(payload)
+                terrain_data = external(command, payload, 'Terrain')
                 result['terrain'] = build_terrain(terrain_data, result['scale'], result['mosaic'])
         if stage == 'geometry':
             result['referenceTerrainCheck'] = terrain_check(job_reference(job), result)

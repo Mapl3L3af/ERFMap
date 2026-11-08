@@ -30,7 +30,7 @@ exit /b
 
 :prepare_python
 if not defined python_cmd (
-    echo Install Python 3.10 or later from https://python.org to prepare image processing and reconstruction support.
+    echo Install Python 3.10 or later from https://python.org to prepare image processing support.
     exit /b 1
 )
 if not exist ".venv\Scripts\python.exe" (
@@ -40,11 +40,11 @@ if not exist ".venv\Scripts\python.exe" (
 set "stamp=.venv\.erfmap-requirements.txt"
 fc /b worker\requirements.txt "%stamp%" >nul 2>nul
 if errorlevel 1 goto install
-".venv\Scripts\python.exe" -c "import cv2, numpy, rasterio" >nul 2>nul
+".venv\Scripts\python.exe" -c "import cv2, numpy" >nul 2>nul
 if errorlevel 1 goto install
 goto ready
 :install
-echo Preparing image processing and NodeODM reconstruction dependencies...
+echo Preparing image processing dependencies...
 ".venv\Scripts\python.exe" -m pip install -r worker\requirements.txt || (echo Dependency setup failed. Check the network, then retry. & exit /b 1)
 copy /y worker\requirements.txt "%stamp%" >nul
 :ready

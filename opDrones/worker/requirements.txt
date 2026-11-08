@@ -9,5 +9,3 @@ pillow>=10
 # transformers>=4.40     SegFormer per-pixel scene model
 # deepforest>=1.4        tree crowns from aerial and drone imagery
 
-# NodeODM DTM and orthophoto raster reading (install for NodeODM integration).
-rasterio>=1.3

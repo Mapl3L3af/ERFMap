@@ -152,14 +152,6 @@ Each connected group gets a planar footprint coverage preview: green is multiple
 
 Warnings pause processing for review. Use **Capture checks** in the job sidebar to inspect thumbnails and download the JSON report. **Continue with 2D mapping** records an acknowledgment and continues the existing planar workflow, even when multi-view reconstruction suitability is blocked. Zero usable captures cannot continue. Upload replacement or connecting imagery in a new flyover. Rerunning frame selection or capture checks clears the acknowledgment and rebuilds downstream outputs. Older completed jobs remain readable; retry frame selection to apply the checks.
 
-## Optional photogrammetry setup
-
-Open **Optional · Photogrammetry setup** before uploading a new flyover. It is off by default. Supply a NodeODM URL, check the connection, and optionally request a full 3D building model. Use at least three overlapping original photographs; realistic building coverage needs many more, including roofs and overlapping angled views of every side. The Info page includes capture guidance and a local Docker setup example.
-
-The URL and building-model option are saved per job. Worker subprocesses receive that job’s engine configuration; enabling one flyover does not enable other flyovers. Existing jobs without these settings retain environment-based adapter configuration. Existing stitched photo flyovers can change setup from the measurement panel; saving rebuilds frame selection and later stages and clears scale calibration and feature review. Angled views are allowed through frame screening for photogrammetry while blur, exposure and texture checks remain active. Capture checks do not verify facade completeness.
-
-Building-model requests explicitly set ODM `skip-3dmodel=false`. The engine’s `all.zip` remains in `nodeodm-all.zip` and is downloadable under Source imagery after reconstruction. erfMap uses the orthophoto and DTM; detailed building meshes/textures remain external artifacts and are not imported into the editable survey or feature-based GLB. Connection checks read engine information and options only; photo uploads occur during processing. An external NodeODM engine is required and is not installed by this setup.
-
 ## Reconstruction terrain adapter
 
 Set `ERFMAP_RECONSTRUCTOR` to a local SfM reconstruction command before starting
@@ -199,66 +191,6 @@ include DTM rasters, and [pc-classify](https://docs.opendronemap.org/arguments/p
 controls point-cloud classification. Its outputs still need scale, vertical-control
 and image-registration handling in the adapter. No ODM adapter or weights are installed
 by this change.
-
-## Run NodeODM locally
-
-Start Docker Desktop, then run `docker run --rm -p 3001:3000 opendronemap/nodeodm`.
-Install the worker requirements in `.venv`, including Rasterio, and start erfMap with
-`ERFMAP_NODEODM_URL=http://127.0.0.1:3001 node server.js`. This automatically
-selects `worker/nodeodm_adapter.py` when no explicit `ERFMAP_RECONSTRUCTOR` is set.
-An explicit custom reconstructor takes precedence. The adapter posts usable images to NodeODM, requests a DTM and ground classification,
-waits for completion, then downloads `all.zip`. New stitched jobs use the ODM
-orthophoto before calibration and labeling. Legacy planar jobs register its
-orthophoto to their existing preview with SIFT/RANSAC. Confirmed map scale is
-applied equally to horizontal and vertical dimensions. Resulting cells are validated by `terrain.py` and become
-survey terrain, contours and terrain-aware GLB geometry.
-
-NodeODM tasks can take hours and consume considerable RAM and disk. The timeout
-is `ERFMAP_NODEODM_TIMEOUT` seconds (default 7200). The NodeODM task UUID and
-server address are stored in `nodeodm-task.json` in the intake job folder. A
-failed or timed-out task remains on NodeODM for inspection. The original images
-and downloaded raster archive remain with the job; back up `.erfmap-data/`.
-
-Ground heights need a connected, sharp reconstruction. Registration requires at
-least 30 distinctive matches, 25 geometric inliers, and at most 8 mosaic pixels
-median reprojection error. A projected metre raster and at least four fully
-observed terrain cells are required. Inadequate overlap, missing DTM, or no
-reliable registration fail Map geometry with an explicit error. The resulting
-coordinates remain local and approximate. This does not turn a planar mosaic into
-a surveyed orthomosaic or recover hidden surfaces.
-
-### ODM orthophoto workflow and recovery
-
-With `ERFMAP_NODEODM_URL` configured (and no custom reconstructor), stitched
-jobs now reconstruct during **Image correction**, before scale calibration,
-labeling and merging. The orthophoto preview (up to 6000 pixels on its longest
-side) is the shared pixel frame. Terrain samples use its raster transform;
-no SIFT registration to a separate planar stitch is needed. Separate-photo
-sheets retain their per-photo workflow. Custom reconstructors retain their
-existing geometry-stage contract.
-
-Retry **Image correction** on an older stitched job to adopt this workflow;
-review scale references and labels again on the new orthophoto. Retrying only
-Map geometry on an older job retains its previous registration behavior.
-Original photos, including camera metadata, are sent when their source paths
-are available. ODM performs camera calibration. Extracted video frames remain
-JPEG captures. Metric scale still requires the existing measured-reference
-review; output coordinates and heights remain local, with accuracy and vertical
-alignment requiring independent verification.
-
-The adapter checks `/options` and image limits before upload. It fingerprints
-image contents and processing options, saves the task ID atomically, reconnects
-to queued/running/completed tasks on retry, and restarts failed/canceled tasks.
-Changed images or options create a fresh task. An interrupted upload creates a
-new upload session; an ambiguous commit fails visibly rather than silently
-launching duplicate processing. NodeODM tasks are retained for inspection.
-Failures save console output as `nodeodm-output.json`.
-
-`dem-gapfill-steps=0` disables ODM DEM hole filling. Raster NODATA remains null in
-the terrain grid, and contours skip incomplete cells. A DTM is still an estimated
-ground surface from classification and rasterization, not proof of direct
-observation of every cell. The downloaded archive retains other ODM assets for
-inspection; mesh import is not part of this workflow.
 
 ## Path detail improvements
 

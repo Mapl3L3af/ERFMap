@@ -10,7 +10,6 @@ const {kinds, restore} = require('../erfmap-survey/model');
 const shared = require('../erfmap-intake/shared');
 const {captureProfile} = require('./capture-profile');
 const mapReference = require('../erfmap-intake/reference');
-const reconstruction = require('./reconstruction');
 
 const STAGES = shared.STAGES;
 // Review is skipped for now: once the map is built, every proposal scoring above
@@ -45,7 +44,7 @@ function createIntake({directory, createProject, readBody}) {
     function spawnWorker(args, job) {
         if (stopping) throw failure(503, 'Server is stopping.');
         // A process group includes Python's FFmpeg and adapter subprocesses.
-        const child = spawn(python, args, {windowsHide: true, detached: process.platform !== 'win32', env: reconstruction.environment(job)});
+        const child = spawn(python, args, {windowsHide: true, detached: process.platform !== 'win32'});
         workers.add(child);
         child.once('close', () => { if (!stopping) workers.delete(child); });
         return child;
@@ -357,12 +356,9 @@ function createIntake({directory, createProject, readBody}) {
     // photo and ?defer=1, the rest are added to /originals, then /start runs them.
     async function upload(req, url) {
         const capture = captureProfile(url.searchParams.get('height_agl_m'));
-        const reconstructionConfig = reconstruction.configuration({enabled: url.searchParams.get('photogrammetry') === '1', url: url.searchParams.get('nodeodm_url'), buildingModel: url.searchParams.get('building_model') === '1'});
-        if (reconstructionConfig.enabled) await reconstruction.check(reconstructionConfig);
         const name = cleanName(url.searchParams.get('name') || 'video.mp4');
         const media = PHOTO.test(name) ? 'photos' : VIDEO.test(name) ? 'video' : null;
         if (!media) throw failure(415, 'Choose a video (MP4, MOV, MKV, AVI, WebM) or photos (JPEG, PNG, TIFF, WebP).');
-        if (reconstructionConfig.enabled && (media !== 'photos' || url.searchParams.get('defer') !== '1')) throw failure(400, 'Photogrammetry needs a deferred upload of at least three original photographs.');
         const id = randomUUID().replace(/-/g, '').slice(0, 12);
         fs.mkdirSync(path.join(dir(id), 'original'), {recursive: true});
         const target = path.join(dir(id), 'original', name);
@@ -370,7 +366,7 @@ function createIntake({directory, createProject, readBody}) {
         try { size = await receive(req, target, MAX_UPLOAD); }
         catch (e) { fs.rmSync(dir(id), {recursive: true, force: true}); throw e; }
         const original = {name, path: 'original/' + name, size, type: req.headers['content-type'] || null};
-        const job = {id, name, media, captureProfile: capture, reconstruction: reconstructionConfig, sceneMode: 'stitched', createdAt: new Date().toISOString(), original, originals: [original], started: media === 'video' || url.searchParams.get('defer') !== '1',
+        const job = {id, name, media, captureProfile: capture, sceneMode: 'stitched', createdAt: new Date().toISOString(), original, originals: [original], started: media === 'video' || url.searchParams.get('defer') !== '1',
             stages: Object.fromEntries(STAGES.map(s => [s.id, {status: 'queued', progress: 0, attempts: 0}])), calibration: {markers: [], references: [], markerSideM: 0.3048}, review: {features: {}, phase: 'zones', feedback: []}, imports: []};
         write(path.join(dir(id), 'labels.json'), labels());
         jobs.set(id, job);
@@ -411,7 +407,6 @@ function createIntake({directory, createProject, readBody}) {
         const parts = url.pathname.split('/').slice(3).map(decodeURIComponent);   // after /api/intake/
         if (parts[0] === 'capabilities' && req.method === 'GET') return json(await capabilities()), true;
         if (parts[0] === 'labels' && req.method === 'GET') return json(labels()), true;
-        if (parts[0] === 'reconstruction-check' && req.method === 'POST') return json(await reconstruction.check(await readBody(req))), true;
         if (parts[0] !== 'jobs') throw failure(404, 'Unknown intake address.');
         if (parts.length === 1) {
             if (req.method === 'GET') return json(list()), true;
@@ -435,9 +430,7 @@ function createIntake({directory, createProject, readBody}) {
             if (!report || !['complete', 'needs_review'].includes(job.stages.capture.status)) throw failure(409, 'Capture checks must finish first.');
             if (!report.images.some(image => !image.excluded)) throw failure(400, 'No usable images remain. Upload sharper, well-lit imagery in a new flyover.');
             const input = await readBody(req);
-            if (!['continue-2d', 'continue-reconstruction'].includes(input.action)) throw failure(400, 'Choose continue-2d or continue-reconstruction to acknowledge the capture report.');
-            if (input.action === 'continue-reconstruction' && (!job.reconstruction?.enabled || report.images.filter(image => !image.excluded).length < 3)) throw failure(400, 'Photogrammetry needs an enabled engine and at least three usable photographs.');
-            if (input.action === 'continue-2d' && job.reconstruction?.enabled) job.reconstruction = {enabled:false};
+            if (input.action !== 'continue-2d') throw failure(400, 'Choose continue-2d to acknowledge the capture report.');
             job.captureReview = {action: input.action, at: new Date().toISOString(), readiness: report.readiness,
                 reportFinishedAt: job.stages.capture.finishedAt, reasons: report.reasons};
             save(job); advance(job);
@@ -465,7 +458,6 @@ function createIntake({directory, createProject, readBody}) {
         if (action === 'originals' && req.method === 'POST') return json(await addPhoto(job, req, url), 201), true;
         if (action === 'start' && req.method === 'POST') {
             if (!job.started) {
-                if (job.reconstruction?.enabled && job.originals.length < 3) throw failure(400, 'Add at least three overlapping photographs before starting photogrammetry.');
                 job.started = true;
                 if (job.media === 'photos') job.name = job.originals.length === 1 ? job.original.name : job.originals.length + ' photos (' + job.original.name + ', …)';
                 save(job); advance(job);
@@ -473,20 +465,6 @@ function createIntake({directory, createProject, readBody}) {
             return json(publicJob(job)), true;
         }
         if (action === 'files' && req.method === 'GET') return serveFile(res, job, parts.slice(3).join('/')), true;
-        if (action === 'reconstruction' && req.method === 'POST') {
-            if (children.has(job.id)) throw failure(409, 'Wait for the current stage to finish before changing photogrammetry setup.');
-            const config = reconstruction.configuration(await readBody(req));
-            if (config.enabled && (job.media !== 'photos' || job.originals.length < 3 || job.sceneMode !== 'stitched')) throw failure(400, 'Photogrammetry setup needs a stitched flyover with at least three original photographs.');
-            if (config.enabled) await reconstruction.check(config);
-            // A connection check may take several seconds; recheck the job lock.
-            if (children.has(job.id)) throw failure(409, 'A stage is running. Try again when it finishes.');
-            job.reconstruction = config;
-            reset(job, 'frames');
-            job.calibration = {markers: [], references: [], markerSideM: job.calibration?.markerSideM || 0.3048};
-            write(path.join(dir(job.id), 'calibration.json'), job.calibration);
-            save(job); advance(job);
-            return json(publicJob(job)), true;
-        }
         if (action === 'map-reference' && req.method === 'POST') {
             if (children.has(job.id)) throw failure(409, 'Wait for processing to finish before changing map references.');
             const mosaic = result(job.id, 'correction')?.mosaic;
