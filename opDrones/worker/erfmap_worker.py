@@ -1417,6 +1417,8 @@ def stage_geometry(job):
     features.sort(key=lambda f: (f['geometry'] == 'point', f['kind'] not in BASE_KINDS))    # zones first, points on top after
     allp = np.concatenate([np.array(f['p']) for f in features]) if features else np.zeros((1, 2))
     origin = allp.min(axis=0) - 2
+    if fusion.get('ground_samples'):
+        fusion['ground_samples'] = [[round(x - origin[0], 3), round(y - origin[1], 3), z] for x, y, z in fusion['ground_samples']]
     for f in features:
         f['p'] = [[round(x - origin[0], 3), round(y - origin[1], 3)] for x, y in f['p']]
         f['region'] = [[round(x - origin[0], 3), round(y - origin[1], 3)] for x, y in f['region']]

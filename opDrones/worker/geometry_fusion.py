@@ -188,7 +188,8 @@ def apply(job, features, mosaic_shape, m_per_px, kinds_available=None):
         return report
     vertical = float(meta.get('vertical_error_m', 0.2))
     hag, slope, rough = surface_cues(dsm, dtm, m_per_px)
-    report.update({'used': True, 'reason': None, 'coverage': round(coverage, 3), 'vertical_error_m': vertical})
+    report.update({'used': True, 'reason': None, 'coverage': round(coverage, 3), 'vertical_error_m': vertical,
+                   'ground_samples': ground_samples(dtm, m_per_px)})
     for f in features:
         point = f.get('point_px') or ((f['p'][0][0] / m_per_px, f['p'][0][1] / m_per_px) if f.get('geometry') == 'point' and not f.get('pixel_polygon') else None)
         mask = feature_mask(dsm.shape, f.get('pixel_polygon'), point, radius_px=max(3, 1.5 / m_per_px))
@@ -210,6 +211,23 @@ def apply(job, features, mosaic_shape, m_per_px, kinds_available=None):
         else:
             report['kept'] += 1
     return report
+
+
+def ground_samples(dtm, m_per_px, spacing_m=5.0, limit=600):
+    """Terrain heights on a regular grid, in metres on the mosaic's axes, relative
+    to the lowest sample (a local zero, not sea level). NoData stays out."""
+    h, w = dtm.shape
+    step = max(1, int(round(spacing_m / m_per_px)), int(math.ceil(math.sqrt(h * w / limit))))
+    out = []
+    for y in range(step // 2, h, step):
+        for x in range(step // 2, w, step):
+            z = dtm[y, x]
+            if np.isfinite(z):
+                out.append([x * m_per_px, y * m_per_px, float(z)])
+    if out:
+        low = min(p[2] for p in out)
+        out = [[round(x, 3), round(y, 3), round(z - low, 3)] for x, y, z in out]
+    return out
 
 
 # ----------------------------------------------------------------- evaluation

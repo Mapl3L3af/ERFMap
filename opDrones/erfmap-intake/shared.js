@@ -122,7 +122,8 @@
         return result;
     }
 
-    function buildSite({job, geometry, features, labels}) {
+    const TEXTURED = new Set(['building', 'grass', 'soil', 'shrub', 'water', 'pavement', 'road', 'roadLine', 'path', 'crossing', 'canopy', 'unknown']);
+    function buildSite({job, geometry, features, labels, texture}) {
         const accepted = features.filter(f => f.status === 'accepted');
         const all = accepted.flatMap(f => f.p);
         const minX = all.length ? Math.min(...all.map(p => p[0])) : 0, minY = all.length ? Math.min(...all.map(p => p[1])) : 0;
@@ -130,7 +131,8 @@
         const origin = sceneBounds ? geometry.scale.origin_px.map(v => -v * geometry.scale.m_per_px) : [minX - MARGIN, minY - MARGIN];
         const shift = p => p.map((v, axis) => +(v - origin[axis]).toFixed(3));
         const out = accepted.map(f => {
-            const feature = {kind: f.kind, p: f.p.map(shift), name: f.name, source: 'Drone intake'};
+            const feature = {kind: f.kind, p: f.p.map(shift), name: f.name, source: 'Drone intake', _syncId: 'intake-' + job.id + '-' + f.id};
+            if (texture && sceneBounds && TEXTURED.has(f.kind)) feature.texture = {asset: 'flyover', projection: 'planar-xy'};
             if (f.height) feature.height = f.height;
             if (f.width && f.geometry === 'line') feature.tagProperties = {width: +f.width.toFixed(2)};
             feature.intake = {
@@ -151,7 +153,15 @@
             name: 'Drone survey · ' + job.name.replace(/\.[^.]+$/, ''),
             w: sceneBounds ? (geometry.mosaic.width - 1) * geometry.scale.m_per_px : +((xs.length ? Math.max(...xs) : 0) + MARGIN).toFixed(2),
             h: sceneBounds ? (geometry.mosaic.height - 1) * geometry.scale.m_per_px : +((ys.length ? Math.max(...ys) : 0) + MARGIN).toFixed(2),
-            features: out, samples: [], showContours: false,
+            features: out,
+            samples: sceneBounds ? (geometry.geometry_fusion?.ground_samples || []).map(([x, y, z]) => [...shift([x, y]), z]) : [],
+            showContours: Boolean(sceneBounds && geometry.geometry_fusion?.ground_samples?.length),
+            reconstruction: geometry.geometry_fusion?.used
+                ? {heights: 'relative to a local zero (lowest ground sample), not sea level', coverage: geometry.geometry_fusion.coverage, verticalErrorM: geometry.geometry_fusion.vertical_error_m, relabelled: geometry.geometry_fusion.changed.length}
+                : {heights: 'none', reason: geometry.geometry_fusion?.reason || 'No reconstruction for this job; terrain is flat.'},
+            ...(texture && sceneBounds ? {assets: {flyover: {type: 'image', role: 'orthophoto', data: texture, name: 'flyover alignment preview', projection: 'planar-xy',
+                bounds: [0, 0, (geometry.mosaic.width - 1) * geometry.scale.m_per_px, (geometry.mosaic.height - 1) * geometry.scale.m_per_px],
+                note: 'Planar alignment preview from the flyover, not an orthomosaic: tall objects lean.'}}, showTextures: true} : {}),
             ...(job.sceneMode === 'stitched' ? {accessReviewed: true} : {}),
             localScale: scale.mode === 'per-image' ? {
                 label: 'Locally scaled, unreferenced', unreferenced: true,

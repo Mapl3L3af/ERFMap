@@ -72,6 +72,11 @@ class Fusion(unittest.TestCase):
         self.assertEqual(fs[0]['image_kind'], 'pavement')
         self.assertGreater(fs[0]['geometry_evidence']['hag_median_m'], 4)
         self.assertEqual(len(report['changed']), 3)
+        samples = report['ground_samples']
+        self.assertTrue(samples)
+        self.assertEqual(min(z for _, _, z in samples), 0)          # relative to a local zero
+        east = [z for x, _, z in samples if x > 25]
+        self.assertTrue(all(z < 2 for z in east))                     # roofs and crowns are not ground
 
     def test_sparse_or_noisy_geometry_falls_back(self):
         dsm = surface()
