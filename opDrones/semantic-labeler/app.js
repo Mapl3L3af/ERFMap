@@ -65,3 +65,41 @@ let trainingTimer;
 async function pollTraining(){clearTimeout(trainingTimer);try{const response=await fetch('/api/training');if(!response.ok)throw Error('Training server unavailable.');const job=await response.json();trainingBusy=job.status==='training';render();if(job.status!=='idle')status(job.message);if(trainingBusy)trainingTimer=setTimeout(pollTraining,2000);}catch(error){trainingBusy=false;render();status('Could not check training: '+error.message+' Reload to reconnect.');}}
 if(location.protocol!=='file:')pollTraining();
 render();
+
+// Full-map export: the selected image is treated as one whole site map, and every
+// hand-placed feature becomes an editable survey item. The result opens in the
+// survey (Import survey) and can be dropped into showcase/ for a demo video.
+const SURVEY_KIND={path:'path',building:'building',tree:'tree',bench:'bench',light:'light',bush:'bush',road:'road',grass:'grass'};
+function mapJson(img,metresPerPixel){
+  const m=v=>Math.round(v*metresPerPixel*100)/100, P=p=>[m(p[0]),m(p[1])];
+  const features=[];
+  for(const a of img.annotations){
+    const cls=classes.find(c=>c.id===a.category_id);if(!cls)continue;
+    const kind=SURVEY_KIND[cls.name.toLowerCase()]||'unknown';let pts=a.points.map(P);
+    if(a.type==='box'&&pts.length>=2){const [[x0,y0],[x1,y1]]=pts;pts=[[x0,y0],[x1,y0],[x1,y1],[x0,y1]];}
+    let feature={kind,p:pts,name:cls.name,source:'Captured',_syncId:'map-'+img.id+'-'+a.id,intake:{source:'hand-labelled map',confidence:1}};
+    if(kind==='tree'||kind==='bench'||kind==='light'||kind==='bush')feature.p=[pts[0]];
+    else if(kind==='path'){
+      if(a.type==='polyline')feature.tagProperties={width:1.8};
+      else{ // a painted path area becomes a centre line with its average width
+        let best=[pts[0],pts[0]],far=0;for(const p of pts)for(const q of pts){const d=Math.hypot(p[0]-q[0],p[1]-q[1]);if(d>far){far=d;best=[p,q];}}
+        let area=0;for(let i=0;i<pts.length;i++){const [x0,y0]=pts[i],[x1,y1]=pts[(i+1)%pts.length];area+=x0*y1-x1*y0;}
+        feature.p=best;feature.tagProperties={width:Math.max(.5,Math.round(Math.abs(area/2)/(far||1)*10)/10)};
+      }
+    }else if(feature.p.length<3)continue;
+    features.push(feature);
+  }
+  const w=m(img.width),h=m(img.height);
+  return {format:'fieldform-site-v1',site:{name:img.name.replace(/\.[^.]+$/,''),w,h,samples:[],features,
+    assets:{flyover:{type:'image',role:'orthophoto',data:img.data,bounds:[0,0,w,h],name:img.name,projection:'planar-xy'}},showTextures:true}};
+}
+$('exportMap').onclick=()=>{
+  const img=active();if(!img){status('Add a full map image first.');return;}
+  if(!img.annotations.length){status('Place features on the map before exporting.');return;}
+  const answer=prompt('How wide is this whole map on the ground, in metres? (used to scale every feature)',img.mapWidthM||'');
+  const width=Number(answer);if(!answer||!Number.isFinite(width)||width<=0){status('Export cancelled: enter the map width in metres.');return;}
+  img.mapWidthM=width;
+  const data=mapJson(img,width/img.width);
+  download(img.name.replace(/\.[^.]+$/,'')+'-map.json',JSON.stringify(data));
+  status('Exported '+data.site.features.length+' features as a survey map ('+width+' m wide).');
+};

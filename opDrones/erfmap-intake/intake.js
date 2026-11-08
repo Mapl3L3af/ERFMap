@@ -20,6 +20,7 @@ const chip = status => '<span class="chip s-' + status + '">' + (STATUS[status] 
 const flags = (list, bad = []) => (list || []).map(f => '<span class="flag ' + (bad.some(b => f.includes(b)) ? 'bad' : '') + '">' + esc(f) + '</span>').join('');
 const label = kind => labels.find(l => l.kind === kind) || {label: kind || 'Unlabelled', color: '#bcb6c4', geometry: 'area'};
 const pts = p => p.map(q => q.map(v => +v.toFixed(2)).join(',')).join(' ');
+const HIDE_REVIEW = new URLSearchParams(location.search).get('review') !== 'on';
 const pct = v => v == null ? '—' : Math.round(v * 100) + '%';
 
 // ---------------------------------------------------------------- home
@@ -109,6 +110,7 @@ async function upload(files) {
             await send('/api/intake/jobs/' + created.id + '/originals?name=' + encodeURIComponent(file.name), file, progress);
             done += file.size;
         }
+        if (created.showcase) { location.assign('/survey/?room=' + created.showcase.code); return; }
         if (photos.length) await api('/api/intake/jobs/' + created.id + '/start', {method: 'POST'});
         location.assign('?job=' + created.id);
     } catch (e) { status.textContent = e.message + ' Choose your files again to retry.'; }
@@ -637,6 +639,14 @@ async function viewReview(body, payload) {
         + '<p>Review each feature in Justify. Choose Yes to accept it or No to reject it and continue.</p><p id="reviewCounts" class="cap"></p></section>'
         + '<section data-review-panel="features" hidden><h2>Feature properties</h2><p class="review-help">Is this feature correct? Review its properties, then choose Yes or No to submit and continue.</p><button type="button" id="acceptAll">Accept all</button><div class="review-table"><table><tbody id="rows"></tbody></table></div><h3 class="review-list-title">Still to review <span class="cap" id="reviewListCount"></span></h3><p class="review-help">Pick any feature to jump to it on the map.</p><div class="review-list" id="reviewList" role="list"></div></section>'
         + '<section data-review-panel="export" hidden><h2>Export</h2><div class="export"><section id="exportScenario"></section><section id="export3d"></section></div></section></div></aside></section>';
+    // Review is skipped for now: proposals over 50% confidence are accepted on the
+    // server, so only the map and Export are shown. Add ?review=on to bring it back.
+    if (HIDE_REVIEW && phase === 'ready') {
+        reviewPanel = 'export';
+        body.querySelectorAll('[data-review-tab="review"],[data-review-tab="features"]').forEach(el => el.remove());
+        body.querySelectorAll('[data-review-panel]').forEach(el => { el.hidden = el.dataset.reviewPanel !== 'export'; });
+        body.querySelector('[data-review-tab="export"]')?.setAttribute('aria-pressed', 'true');
+    }
     const v = viewer = mapView(document.getElementById('rmap'), geometry, () => features().filter(f => reviewPanel !== 'features' || f.id === active || (visible(f) && f.status === 'proposed')), {editable: phase !== 'ready' || !staged, active: () => active, shadows: () => shadows,
         overlay: (toPx, k) => {
             let markup = outline.length ? '<polyline points="' + pts(outline.map(toPx)) + '" fill="none" stroke="#fff" stroke-width="2" vector-effect="non-scaling-stroke"/>' : '';
@@ -727,6 +737,7 @@ async function viewReview(body, payload) {
         if (field === 'height') save(id, {height: el.value === '' ? null : Number(el.value)});
     });
     function showReviewPanel(name) {
+        if (HIDE_REVIEW && phase === 'ready') name = 'export';
         reviewPanel = name;
         if (name === 'review') v.fit();
         else if (name === 'features' && active) focusFeature(active);
