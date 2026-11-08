@@ -54,6 +54,9 @@ CELLS = 14                # CLIP windows across the longest side
 PRIORITY = 0.8            # a higher-priority class wins when within this ratio of the best score
 MIN_ZONE = 0.002          # building, path and road pieces smaller than this share of the photo go to grass
 VEG_MIN, VEG_MAX = 0.02, 0.10   # limits for the per-photo greenness threshold
+JOIN_REACH = 0.15         # path ends this far apart (share of the photo's long side) may be joined ...
+JOIN_ANGLE = 35           # ... when each points at the other within this many degrees
+T_REACH = 3               # an end pointing at the side of another path is carried up to this many path widths
 PAVED = 0.6               # on bare (not green) ground, building/path/road wins when within this ratio of the best score
 POINT_MIN = 0.6           # a lamp post or bench needs at least this probability ...
 POINT_MARGIN = 2.0        # ... and this many times the best surface score
@@ -446,6 +449,8 @@ def build_zones(image, probs, size, trees=None, votes=None):
         squared.append((filled > 0, corners))
     path &= ~building
     road &= ~building
+    path_shapes, path = path_lines(path, building, scale, size, max(1.0, 0.002 * max(h, w)))
+    road &= ~path
     grass = ~(building | path | road)
     tol = max(1.0, 0.002 * max(h, w))
     regions = []
@@ -460,8 +465,8 @@ def build_zones(image, probs, size, trees=None, votes=None):
             said = {m: round(float(v[:, :, k_label][piece].mean()), 3) for m, v in (votes or {}).items()}
             exact = next((corners for m, corners in squared if label == 'building' and (m & piece).sum() > 0.9 * piece.sum()), None)
             shapes = [{'polygon': [[round(float(x) / scale, 1), round(float(y) / scale, 1)] for x, y in exact]}] if exact is not None else polygons(piece, scale, size, tol)
-            if label == 'path':
-                shapes = path_lines(piece, scale, size, tol) or shapes
+            if label == 'path' and path_shapes:
+                continue                                       # paths are added as lines below
             for p in shapes:
                 region = {'polygon': p['polygon'], 'label': ZONE_KIND[label], 'model_label': label, 'role': 'zone', 'confidence': round(conf, 3)}
                 if 'line' in p:
@@ -469,6 +474,16 @@ def build_zones(image, probs, size, trees=None, votes=None):
                 if said:
                     region['votes'] = said
                 regions.append(region)
+
+    k_path = CLASSES.index('path')
+    for p in path_shapes:
+        part = p.pop('part')
+        region = {'polygon': p['polygon'], 'label': ZONE_KIND['path'], 'model_label': 'path', 'role': 'zone',
+                  'confidence': round(float(probs[:, :, k_path][part].mean()), 3), 'line': p['line'], 'width': p['width']}
+        said = {m: round(float(v[:, :, k_path][part].mean()), 3) for m, v in (votes or {}).items()}
+        if said:
+            region['votes'] = said
+        regions.append(region)
 
     if trees is not None:                 # a tree detector found the crowns
         for x, y, conf, r in trees:
@@ -492,13 +507,103 @@ def build_zones(image, probs, size, trees=None, votes=None):
     return regions
 
 
-def path_lines(piece, scale, size, tol):
-    """A path area as centre-line segments: each line gets the part of the area closest to it
-    (so pieces never overlap) and the path's average width."""
-    h, w = piece.shape
-    lines, width = centre_lines(piece, (h, w))
+def ends_of(line):
+    """Both ends of a polyline with the outward direction at each."""
+    out = []
+    for end, inner in ((0, 1), (-1, -2)):
+        d = line[end] - line[inner]
+        n = np.hypot(*d)
+        if n > 1e-6:
+            out.append((end, line[end], d / n))
+    return out
+
+
+def connect_paths(lines, widths, blocked, frame_size):
+    """Paths rarely just stop: shade, a tree or a coarse score often breaks one path in two.
+    Ends that point at each other are joined into one line (greedily, closest first), and an end
+    that points at the side of another path is carried on to meet it. Gaps never cross a building.
+    Returns the lines, their widths and the bridging strokes [(a, b, width)]."""
+    h, w = frame_size
+    reach = JOIN_REACH * max(h, w)
+    at_edge = lambda q: q[0] <= 2 or q[1] <= 2 or q[0] >= w - 3 or q[1] >= h - 3
+    lines, widths = [l.copy() for l in lines], list(widths)
+
+    def clear(a, b, width):
+        stroke = np.zeros((h, w), np.uint8)
+        cv2.line(stroke, tuple(int(v) for v in np.round(a)), tuple(int(v) for v in np.round(b)), 1, max(1, int(width)))
+        return (blocked[stroke > 0]).mean() < 0.1 if stroke.any() else True
+
+    def facing(u, gap):
+        n = np.hypot(*gap)
+        return n > 0 and np.dot(u, gap / n) >= np.cos(np.radians(JOIN_ANGLE))
+
+    bridges, refused = [], set()
+    while True:                                             # 1. end to end
+        best = None
+        for i in range(len(lines)):
+            for j in range(i + 1, len(lines)):
+                for ei, qi, ui in ends_of(lines[i]):
+                    for ej, qj, uj in ends_of(lines[j]):
+                        if at_edge(qi) or at_edge(qj):
+                            continue
+                        gap = qj - qi
+                        d = np.hypot(*gap)
+                        if (d <= reach and facing(ui, gap) and facing(uj, -gap) and (best is None or d < best[0])
+                                and (tuple(np.round(qi)), tuple(np.round(qj))) not in refused):
+                            best = (d, i, ei, j, ej)
+        if best is None:
+            break
+        d, i, ei, j, ej = best
+        a = lines[i] if ei == -1 else lines[i][::-1]          # a ends where the gap starts
+        b = lines[j] if ej == 0 else lines[j][::-1]           # b starts where it ends
+        width = (widths[i] + widths[j]) / 2
+        if not clear(a[-1], b[0], width):
+            refused.add((tuple(np.round(lines[i][ei])), tuple(np.round(lines[j][ej]))))
+            continue
+        bridges.append((a[-1].copy(), b[0].copy(), width))
+        joined, wj = np.concatenate([a, b]), width
+        lines = [l for k, l in enumerate(lines) if k not in (i, j)] + [joined]
+        widths = [x for k, x in enumerate(widths) if k not in (i, j)] + [wj]
+    for i, line in enumerate(lines):                          # 2. end to the side of another path
+        for end, q, u in ends_of(line):
+            if at_edge(q):
+                continue
+            hit = None
+            for j, other in enumerate(lines):
+                if j == i:
+                    continue
+                for p1, p2 in zip(other[:-1], other[1:]):
+                    A = np.array([u, p1 - p2]).T
+                    if abs(np.linalg.det(A)) < 1e-6:
+                        continue
+                    t, s_ = np.linalg.solve(A, p1 - q)
+                    if 0 < t <= min(reach, T_REACH * widths[i]) and 0 <= s_ <= 1 and (hit is None or t < hit[0]):
+                        hit = (t, q + t * u)
+            if hit and hit[0] > 1 and clear(q, hit[1], widths[i]):
+                bridges.append((q.copy(), hit[1], widths[i]))
+                line[end] = hit[1]
+    return lines, widths, bridges
+
+
+def path_lines(path, blocked, scale, size, tol):
+    """Every path in a photo as centre-line segments, with breaks joined (see connect_paths).
+    Each line gets the part of the path area closest to it, so pieces never overlap.
+    Returns the shapes and the path area including the filled gaps."""
+    h, w = path.shape
+    lines, widths = [], []
+    count, comp = cv2.connectedComponents(path.astype(np.uint8))
+    for c in range(1, count):
+        found, width = centre_lines(comp == c, (h, w))
+        lines += found
+        widths += [width] * len(found)
     if not lines:
-        return []
+        return [], path
+    lines, widths, bridges = connect_paths(lines, widths, blocked, (h, w))
+    path = path.copy()
+    for a, b, width in bridges:
+        stroke = np.zeros((h, w), np.uint8)
+        cv2.line(stroke, tuple(int(v) for v in np.round(a)), tuple(int(v) for v in np.round(b)), 1, max(1, int(round(width))))
+        path |= (stroke > 0) & ~blocked
     near = []
     for line in lines:
         drawn = np.full((h, w), 255, np.uint8)
@@ -509,10 +614,11 @@ def path_lines(piece, scale, size, tol):
     snap = lambda v, top: 0.0 if v <= 1.5 else float(top) if v >= top - 1.5 else round(float(v), 1)
     out = []
     for i, line in enumerate(lines):
-        for p in polygons(piece & (owner == i), scale, size, tol)[:1]:
-            out.append({'polygon': p['polygon'], 'width': round(width / scale, 1),
+        part = path & (owner == i)
+        for p in sorted(polygons(part, scale, size, tol), key=lambda p: -p['area'])[:1]:
+            out.append({'polygon': p['polygon'], 'width': round(widths[i] / scale, 1), 'part': part,
                         'line': [[snap(x / scale, w0), snap(y / scale, h0)] for x, y in line]})
-    return out
+    return out, path
 
 
 def point_region(x, y, label, confidence, size):

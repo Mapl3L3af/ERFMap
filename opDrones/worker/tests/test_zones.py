@@ -251,6 +251,50 @@ class BuildingTest(unittest.TestCase):
             self.assertAlmostEqual(a, 90, delta=1.5)
 
 
+class PathJoinTest(unittest.TestCase):
+    def build(self, edit):
+        image, probs = scene()
+        probs = probs.copy()
+        edit(image, probs)
+        return cz.build_zones(image, probs, SIZE)
+
+    def test_a_path_broken_by_shade_is_joined(self):
+        def shade(image, probs):
+            image[200:300, 280:360] = (35, 45, 40)                    # a dark shadow across the path
+            probs[200:300, 280:360] = 0.06
+            probs[200:300, 280:360, cz.CLASSES.index('grass')] = 0.76  # and the model calls it grass
+        regions = self.build(shade)
+        lines = [np.array(r['line']) for r in regions if r.get('model_label') == 'path']
+        spanning = [l for l in lines if l[:, 1].min() < 300 and l[:, 1].max() > 700 and np.all(np.abs(l[:, 0] - 640) < 15)]
+        self.assertTrue(spanning, 'one line runs through the shade: %s' % [l.tolist() for l in lines])
+        grass_there = [r for r in regions if r.get('model_label') == 'grass' and inside(r['polygon'], 640, 500)]
+        self.assertFalse(grass_there, 'the gap is path, not grass')
+        left = [r for r in regions if r.get('model_label') == 'grass' and inside(r['polygon'], 300, 300)]
+        right = [r for r in regions if r.get('model_label') == 'grass' and inside(r['polygon'], 1000, 300)]
+        self.assertNotEqual(left[0]['polygon'], right[0]['polygon'], 'the joined path still divides the lawn')
+
+    def test_paths_that_do_not_point_at_each_other_stay_apart(self):
+        lines = [np.array([[100.0, 100.0], [300.0, 100.0]]), np.array([[340.0, 300.0], [340.0, 500.0]])]
+        out, _, bridges = cz.connect_paths(lines, [20, 20], np.zeros((600, 800), bool), (600, 800))
+        self.assertEqual(len(out), 2)
+        self.assertEqual(bridges, [])
+
+    def test_an_end_is_carried_to_the_side_of_the_path_it_points_at(self):
+        lines = [np.array([[400.0, 50.0], [400.0, 550.0]]), np.array([[100.0, 300.0], [350.0, 300.0]])]
+        out, _, bridges = cz.connect_paths(lines, [20, 20], np.zeros((600, 800), bool), (600, 800))
+        self.assertEqual(out[1][-1].tolist(), [400.0, 300.0])
+        self.assertEqual(len(bridges), 1)
+
+    def test_a_gap_is_never_bridged_across_a_building(self):
+        lines = [np.array([[100.0, 300.0], [300.0, 300.0]]), np.array([[420.0, 300.0], [700.0, 300.0]])]
+        roof = np.zeros((600, 800), bool)
+        roof[250:350, 320:400] = True
+        out, _, bridges = cz.connect_paths(lines, [20, 20], roof, (600, 800))
+        self.assertEqual(len(out), 2)
+        out, _, _ = cz.connect_paths(lines, [20, 20], np.zeros((600, 800), bool), (600, 800))
+        self.assertEqual(len(out), 1)
+
+
 class CouncilTest(unittest.TestCase):
     def test_label_names_map_onto_our_classes(self):
         ids = cz.map_labels({0: 'wall', 1: 'building, edifice', 2: 'sidewalk, pavement', 3: 'grass', 4: 'tree', 5: 'sky', 6: 'road, route', 7: 'impervious surfaces'}, cz.SYNONYMS)
