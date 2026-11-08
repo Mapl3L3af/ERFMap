@@ -13,6 +13,11 @@ const mapReference = require('../erfmap-intake/reference');
 const reconstruction = require('./reconstruction');
 
 const STAGES = shared.STAGES;
+// Review is skipped for now: once the map is built, every proposal scoring above
+// AUTO_ACCEPT is accepted and the rest rejected, so a job goes straight to import.
+// Set ERFMAP_REVIEW=on to bring back the step-by-step review.
+const SKIP_REVIEW = process.env.ERFMAP_REVIEW !== 'on';
+const AUTO_ACCEPT = Number(process.env.ERFMAP_AUTO_ACCEPT) || 0.5;
 const WORKER = path.join(__dirname, '..', 'worker', 'erfmap_worker.py');
 const VIDEO = /\.(mp4|mov|m4v|avi|mkv|webm|mts|m2ts|3gp)$/i;
 const PHOTO = /\.(jpe?g|png|tiff?|webp|bmp)$/i;
@@ -164,6 +169,7 @@ function createIntake({directory, createProject, readBody}) {
                 const geometry = result(job.id, 'geometry');
                 const ready = geometry?.features?.length;
                 const imported = job.imports?.length;
+                if (ready && SKIP_REVIEW && !job.review?.autoTried && job.review?.phase !== 'ready') { autoReview(job); return; }
                 const status = ready ? (imported ? 'complete' : 'needs_review') : 'blocked';
                 if (state.status !== status) { Object.assign(state, {status, progress: ready ? 1 : 0, summary: ready ? (imported ? 'Imported ' + job.imports.length + ' time(s)' : geometry.features.length + ' proposed features awaiting review') : 'Waiting for map geometry'}); save(job); }
                 return;
@@ -263,6 +269,46 @@ function createIntake({directory, createProject, readBody}) {
         if (mode === 'ground') for (const f of geometry.features.filter(f => f.kind === 'grass')) job.review.features[f.id] = {status: 'accepted'};
         job.stages.geometry.finishedAt = new Date().toISOString();
         return response;
+    }
+
+    // Decide every undecided proposal by confidence. Items without a score (ground,
+    // detected access markers, entrances) come from fixed rules, so a known kind is kept.
+    function autoDecide(job) {
+        const geometry = result(job.id, 'geometry'), now = new Date().toISOString();
+        for (const f of geometry?.features || []) {
+            const prior = job.review.features[f.id];
+            if (prior?.status && prior.status !== 'proposed') continue;
+            const score = f.confidence == null ? NaN : Number(f.confidence);
+            const accept = Number.isFinite(score) ? score > AUTO_ACCEPT : f.kind !== 'unknown';
+            job.review.features[f.id] = {...prior, status: accept ? 'accepted' : 'rejected', auto: true, reviewedAt: now};
+        }
+    }
+    async function autoReview(job) {
+        if (children.has(job.id)) return;
+        job.review = {features: {}, feedback: [], ...job.review, autoTried: true};
+        Object.assign(job.stages.review, {status: 'processing', progress: .5, summary: 'Accepting proposals above ' + Math.round(AUTO_ACCEPT * 100) + '% confidence'});
+        save(job);
+        try {
+            autoDecide(job);
+            const geometry = result(job.id, 'geometry');
+            if (geometry.mosaic?.image) { await refine(job, 'ground'); autoDecide(job); }
+            if (!job.review.pointsDetected) { await refine(job, 'points'); job.review.pointsDetected = true; autoDecide(job); }
+            const g = result(job.id, 'geometry'), access = shared.edgeAccess(reviewed(job), g), regenerated = new Set(access.map(f => f.id));
+            g.features = g.features.filter(f => !regenerated.has(f.id));
+            g.features.push(...access);
+            for (const f of access) delete job.review.features[f.id];
+            write(path.join(dir(job.id), 'stages/geometry/result.json'), g);
+            autoDecide(job);
+            job.review.phase = 'ready';
+            const counts = Object.values(job.review.features).reduce((n, f) => (n[f.status] = (n[f.status] || 0) + 1, n), {});
+            job.review.auto = {threshold: AUTO_ACCEPT, accepted: counts.accepted || 0, rejected: counts.rejected || 0};
+            Object.assign(job.stages.review, {status: 'needs_review', progress: 1, summary: (counts.accepted || 0) + ' accepted automatically (over ' + Math.round(AUTO_ACCEPT * 100) + '% confidence), ' + (counts.rejected || 0) + ' left out. Ready to import.'});
+        } catch (e) {
+            // Fall back to the manual review rather than leaving the job stuck.
+            job.review.autoError = e.message;
+            Object.assign(job.stages.review, {status: 'needs_review', progress: 1, summary: 'Automatic review failed (' + e.message + '); review by hand.'});
+        }
+        save(job);
     }
 
     function reviewed(job) {
