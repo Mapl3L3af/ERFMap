@@ -904,7 +904,7 @@ def stage_regions(job):
         for r in reply.get('regions', []):
             if r.get('frame') in {f['id'] for f in frames} and len(r.get('polygon', [])) >= 3:
                 region = {'frame': r['frame'], 'polygon': r['polygon'], 'area_px': polygon_area(r['polygon']), 'mean_rgb': r.get('mean_rgb'), 'score': r.get('score')}
-                for key in ('label', 'model_label', 'confidence', 'role', 'point', 'votes'):
+                for key in ('label', 'model_label', 'confidence', 'role', 'point', 'votes', 'line', 'width'):
                     if r.get(key) is not None:
                         region[key] = r[key]
                 regions.append(region)
@@ -1104,7 +1104,9 @@ def stage_merging(job):
             omitted += 1
             continue
         items.append({'region': r, 'poly': poly, 'mask': mask.astype(bool), 'pred': preds.get(r['id'], {}), 'role': r.get('role'),
-                      'point': apply_h(to_mosaic[r['frame']], [r['point']])[0] if r.get('point') else None})
+                      'point': apply_h(to_mosaic[r['frame']], [r['point']])[0] if r.get('point') else None,
+                      'line': apply_h(to_mosaic[r['frame']], r['line']) if r.get('line') else None,
+                      'width': r['width'] * math.sqrt(abs(np.linalg.det(np.asarray(to_mosaic[r['frame']], float)[:2, :2]))) if r.get('width') else None})
     items.sort(key=lambda it: -it['mask'].sum())
     clusters = []
     for n, it in enumerate(items):
@@ -1168,6 +1170,10 @@ def stage_merging(job):
             merged[-1]['point'] = np.mean(located, axis=0).round(1).tolist()
         if c['members'][0]['role']:
             merged[-1]['role'] = c['members'][0]['role']
+        traced = [m for m in c['members'] if m['line'] is not None]
+        if traced:                                   # a centre line traced by the segmenter (paths)
+            merged[-1]['line'] = traced[0]['line'].round(1).tolist()
+            merged[-1]['width_px'] = round(float(traced[0]['width']), 1)
     if not zoned:
         merged = join_blocks(merged, size, s, per_image=corr.get('layout') == 'sheet')
     conflicts = sum(1 for m in merged if any(f.startswith('conflicting') or f.startswith('geometry') for f in m['flags']))
@@ -1297,6 +1303,10 @@ def geometry_per_image(job, merged, labels, calibration):
         p, width, note = shape_of(poly, geometry)
         if geometry == 'point' and g.get('point'):
             p, note = [to_m(g['point'])], 'Point placed at the feature\'s visible location.'
+        if geometry == 'line' and g.get('line'):
+            p = [to_m(q) for q in g['line']]
+            width = round(g['width_px'] * i['k'] * m_common, 2)
+            note = 'Centre line fitted with straight segments; width is the average across the path, %.1f m.' % width
         a, b = to_m(i['a']), to_m(i['b'])
         segment_m = i['metres']
         distance = segment_distance(poly.mean(axis=0), a, b)
@@ -1358,6 +1368,10 @@ def stage_geometry(job):
         p, width, note = shape_of(poly, geometry)
         if geometry == 'point' and g.get('point'):
             p, note = [[g['point'][0] * m_per_px, g['point'][1] * m_per_px]], 'Point placed at the feature\'s visible location.'
+        if geometry == 'line' and g.get('line'):
+            p = [[q[0] * m_per_px, q[1] * m_per_px] for q in g['line']]
+            width = round(g['width_px'] * m_per_px, 2)
+            note = 'Centre line fitted with straight segments; width is the average across the path, %.1f m.' % width
         features.append({'id': g['id'], 'kind': kind, 'predicted_kind': g['kind'], 'geometry': geometry, 'p': p,
                          'region': poly.tolist(), 'width_m': width,
                          'pixel_polygon': g['polygon'], 'confidence': g['confidence'], 'frames': g['frames'],

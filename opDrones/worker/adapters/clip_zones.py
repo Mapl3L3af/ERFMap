@@ -12,8 +12,8 @@ zone edges follow visible edges in the photo, then zones are assigned in priorit
   3. grass is the fallback for everything left, split wherever a path or road
      divides it, with holes kept around buildings and other zones.
 
-Zones never overlap. Paths become erfMap "pavement" areas so their full width
-is kept (erfMap's "path" kind is a line).
+Zones never overlap. Buildings are squared up to right angles, and paths become erfMap
+"path" lines: a centre line of best-fit straight segments with the path's width.
 
 Stage 2, points. Trees, lamp posts and benches become single points at their
 visible location. Points sit on top of the zones and never change them.
@@ -48,7 +48,7 @@ POINTS = {
     'bench': ['a park bench', 'a wooden bench'],
 }
 TEMPLATES = ['an aerial photo of {}.', 'a top-down drone photo of {}.']
-ZONE_KIND = {'building': 'building', 'path': 'pavement', 'road': 'road', 'grass': 'grass'}
+ZONE_KIND = {'building': 'building', 'path': 'path', 'road': 'road', 'grass': 'grass'}
 WORK_SIDE = 1024          # photos are analysed at this longest side
 CELLS = 14                # CLIP windows across the longest side
 PRIORITY = 0.8            # a higher-priority class wins when within this ratio of the best score
@@ -116,6 +116,203 @@ def vegetation(image):
     k = np.ones((5, 5), np.uint8)
     veg = cv2.morphologyEx(cv2.morphologyEx(veg, cv2.MORPH_OPEN, k), cv2.MORPH_CLOSE, k)
     return veg > 0
+
+
+def square_up(mask):
+    """A right-angled outline for one building: each side is a best-fit straight line through the
+    traced edge, every side runs along or across the building's main direction, and neighbouring
+    sides meet at 90 degrees. Returns work-pixel corners, or None when no good fit exists."""
+    contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
+    if not contours:
+        return None
+    contour = max(contours, key=cv2.contourArea).reshape(-1, 2).astype(np.float64)
+    area = cv2.contourArea(contour.astype(np.float32))
+    if len(contour) < 8 or area < 16:
+        return None
+    # Main direction: length-weighted average of edge angles, folded so that 0 and 90 degrees agree.
+    step = np.roll(contour, -3, axis=0) - contour
+    angle = np.arctan2(step[:, 1], step[:, 0])
+    weight = np.hypot(step[:, 0], step[:, 1])
+    theta = np.angle(np.sum(weight * np.exp(4j * angle))) / 4
+    axes = [np.array([np.cos(theta), np.sin(theta)]), np.array([-np.sin(theta), np.cos(theta)])]
+    # Corners of the traced outline split it into sides; each side takes the closer of the two directions.
+    tol = max(2.0, 0.02 * cv2.arcLength(contour.astype(np.float32), True))
+    corners = cv2.approxPolyDP(contour.astype(np.float32), tol, True).reshape(-1, 2)
+    index = [int(np.argmin(np.hypot(*(contour - c).T))) for c in corners]
+    order = np.argsort(index)
+    index = [index[i] for i in order]
+    sides = []
+    for a, b in zip(index, index[1:] + [index[0] + len(contour)]):
+        pts = contour[np.arange(a, b + 1) % len(contour)]
+        d = pts[-1] - pts[0]
+        if np.hypot(*d) < 1e-6:
+            continue
+        k = 0 if abs(np.dot(d, axes[0])) >= abs(np.dot(d, axes[1])) else 1
+        if sides and sides[-1][0] == k:
+            sides[-1][1].append(pts)                     # same direction as the last side: one longer side
+        else:
+            sides.append([k, [pts]])
+    if len(sides) > 1 and sides[0][0] == sides[-1][0]:
+        sides[0][1] += sides.pop()[1]
+    if len(sides) < 4 or len(sides) % 2:
+        return None
+    lines = []
+    for k, parts in sides:
+        pts = np.concatenate(parts)
+        normal = axes[1 - k]
+        lines.append((axes[k], normal, float(np.mean(pts @ normal))))   # best-fit offset of the side
+    out = []
+    for (d1, n1, c1), (d2, n2, c2) in zip(lines, lines[1:] + lines[:1]):
+        A = np.array([n1, n2])
+        out.append(np.linalg.solve(A, [c1, c2]))         # neighbouring sides are perpendicular, so they meet
+    out = np.array(out)
+    fitted = abs(cv2.contourArea(out.astype(np.float32)))
+    if not 0.75 * area <= fitted <= 1.25 * area:
+        rect = cv2.boxPoints(cv2.minAreaRect(contour.astype(np.float32)))
+        return rect if 0.6 * area <= cv2.contourArea(rect) <= 1.4 * area else None
+    return out
+
+
+def thin(mask):
+    """One-pixel-wide skeleton (Zhang-Suen thinning)."""
+    img = np.pad(mask.astype(np.uint8), 1)
+    while True:
+        changed = False
+        for step in (0, 1):
+            p2, p3, p4 = img[:-2, 1:-1], img[:-2, 2:], img[1:-1, 2:]
+            p5, p6, p7 = img[2:, 2:], img[2:, 1:-1], img[2:, :-2]
+            p8, p9 = img[1:-1, :-2], img[:-2, :-2]
+            ring = [p2, p3, p4, p5, p6, p7, p8, p9, p2]
+            b = sum(ring[:8])
+            a = sum(((ring[i] == 0) & (ring[i + 1] == 1)).astype(np.uint8) for i in range(8))
+            c = (p2 * p4 * p6 == 0) if step == 0 else (p2 * p4 * p8 == 0)
+            d = (p4 * p6 * p8 == 0) if step == 0 else (p2 * p6 * p8 == 0)
+            drop = (img[1:-1, 1:-1] == 1) & (b >= 2) & (b <= 6) & (a == 1) & c & d
+            if drop.any():
+                img[1:-1, 1:-1][drop] = 0
+                changed = True
+        if not changed:
+            return img[1:-1, 1:-1] > 0
+
+
+RING = [(-1, 0), (-1, 1), (0, 1), (1, 1), (1, 0), (1, -1), (0, -1), (-1, -1)]   # clockwise from north
+
+
+def trace(skeleton):
+    """Split a skeleton into chains of pixels running between ends and junctions.
+
+    Ends and junctions are found by counting how many separate branches touch a pixel
+    (the crossing number), so staircase steps in diagonal lines are not mistaken for junctions."""
+    ys, xs = np.nonzero(skeleton)
+    on = set(zip(ys.tolist(), xs.tolist()))
+    near = lambda q: [(q[0] + dy, q[1] + dx) for dy, dx in RING if (q[0] + dy, q[1] + dx) in on]
+
+    def branches(q):
+        ring = [(q[0] + dy, q[1] + dx) in on for dy, dx in RING]
+        return sum(1 for i in range(8) if not ring[i] and ring[(i + 1) % 8])
+
+    nodes = {q for q in on if branches(q) != 2}
+    visited, chains = set(), []
+
+    def walk(start, first):
+        chain, prev, cur = [start, first], start, first
+        while cur not in nodes:
+            visited.add(cur)
+            ahead = [q for q in near(cur) if q != prev and q not in visited and q not in chain[-3:]]
+            if not ahead:
+                break
+            ahead.sort(key=lambda q: (q not in nodes, abs(q[0] - cur[0]) + abs(q[1] - cur[1])))   # junctions first, then straight steps
+            prev, cur = cur, ahead[0]
+            chain.append(cur)
+        return np.array([[x, y] for y, x in chain], np.float64)
+
+    for start in sorted(nodes):
+        for first in near(start):
+            if first not in visited and first not in nodes:
+                chains.append(walk(start, first))
+    for q in sorted(on - visited - nodes):                     # closed loops with no end or junction
+        if q not in visited:
+            visited.add(q)
+            chains.append(walk(q, near(q)[0])) if near(q) else None
+    return chains
+
+
+def fit_polyline(points, tol):
+    """Straight segments through a chain of centre-line pixels: break points from Douglas-Peucker,
+    then each segment is a least-squares line and neighbouring lines meet where they cross."""
+    if len(points) < 2:
+        return None
+    breaks = cv2.approxPolyDP(points.astype(np.float32).reshape(-1, 1, 2), tol, False).reshape(-1, 2)
+    index = sorted({int(np.argmin(np.hypot(*(points - b).T))) for b in breaks} | {0, len(points) - 1})
+    lines = []
+    for a, b in zip(index, index[1:]):
+        seg = points[a:b + 1]
+        vx, vy, x0, y0 = cv2.fitLine(seg.astype(np.float32), cv2.DIST_L2, 0, 0.01, 0.01).ravel()
+        lines.append((np.array([x0, y0], float), np.array([vx, vy], float)))
+    project = lambda q, line: line[0] + np.dot(q - line[0], line[1]) * line[1]
+    out = [project(points[0], lines[0])]
+    for (p1, d1), (p2, d2) in zip(lines, lines[1:]):
+        A = np.array([d1, -d2]).T
+        if abs(np.linalg.det(A)) < 0.05:                     # nearly straight on: keep the shared break point
+            out.append((project(points[index[len(out)]], (p1, d1)) + project(points[index[len(out)]], (p2, d2))) / 2)
+        else:
+            t = np.linalg.solve(A, p2 - p1)
+            out.append(p1 + t[0] * d1)
+    out.append(project(points[-1], lines[-1]))
+    return np.array(out)
+
+
+def join_chains(chains):
+    """Once spurs are gone, a junction with only two chains left is just a bend: join them into one line."""
+    chains = [c for c in chains]
+    key = lambda q: (int(round(q[0])), int(round(q[1])))
+    while True:
+        ends = {}
+        for i, c in enumerate(chains):
+            for side in (0, -1):
+                ends.setdefault(key(c[side]), []).append((i, side))
+        pair = next((v for v in ends.values() if len(v) == 2 and v[0][0] != v[1][0]), None)
+        if pair is None:
+            return chains
+        (i, si), (j, sj) = pair
+        a = chains[i] if si == -1 else chains[i][::-1]          # a ends at the shared point
+        b = chains[j] if sj == 0 else chains[j][::-1]           # b starts there
+        chains = [c for k, c in enumerate(chains) if k not in (i, j)] + [np.concatenate([a, b[1:]])]
+
+
+def centre_lines(piece, frame_size):
+    """Centre lines of one path or road area as straight-segment polylines, with its average width.
+    Short spurs from ragged edges are dropped; lines that reach the photo edge are carried to it."""
+    h, w = frame_size
+    dist = cv2.distanceTransform(np.pad(piece.astype(np.uint8), 1), cv2.DIST_L2, 5)[1:-1, 1:-1]
+    skeleton = thin(piece)
+    if not skeleton.any():
+        return [], 0.0
+    width = float(2 * np.median(dist[skeleton]))
+    chains = [c for c in trace(skeleton) if len(c) >= 2]
+    longest = max((len(c) for c in chains), default=0)
+    chains = [c for c in chains if len(c) >= max(3, 1.5 * width) or len(c) == longest]   # drop spurs from ragged edges
+    chains = join_chains(chains)
+    out = []
+    for chain in chains:
+        line = fit_polyline(chain, max(2.0, width / 2))
+        if line is None:
+            continue
+        for end, inner in ((0, 1), (-1, -2)):                  # reach the edge where the path leaves the photo
+            q, d = line[end], line[end] - line[inner]
+            n = np.hypot(*d)
+            if n < 1e-6:
+                continue
+            d = d / n
+            reach = width
+            ahead = q + d * reach
+            if not (0 <= ahead[0] < w and 0 <= ahead[1] < h):
+                ts = [t for t in ((-q[0]) / d[0] if d[0] < 0 else (w - 1 - q[0]) / d[0] if d[0] > 0 else np.inf,
+                                  (-q[1]) / d[1] if d[1] < 0 else (h - 1 - q[1]) / d[1] if d[1] > 0 else np.inf) if t >= 0]
+                if ts:
+                    line[end] = q + d * min(ts)
+        out.append(line)
+    return out, width
 
 
 def smooth_mask(mask, size):
@@ -233,6 +430,22 @@ def build_zones(image, probs, size, trees=None, votes=None):
         return keep[comp]
 
     building, path, road = drop_small(building), drop_small(path), drop_small(road)
+    # Buildings are right-angled: replace each traced outline with straight, square-cornered sides.
+    squared = []
+    count, comp = cv2.connectedComponents(building.astype(np.uint8))
+    building = np.zeros((h, w), bool)
+    for c in range(1, count):
+        piece = comp == c
+        corners = square_up(piece)
+        if corners is None:
+            building |= piece
+            continue
+        filled = np.zeros((h, w), np.uint8)
+        cv2.fillPoly(filled, [np.round(corners).astype(np.int32)], 1)
+        building |= filled > 0
+        squared.append((filled > 0, corners))
+    path &= ~building
+    road &= ~building
     grass = ~(building | path | road)
     tol = max(1.0, 0.002 * max(h, w))
     regions = []
@@ -245,8 +458,14 @@ def build_zones(image, probs, size, trees=None, votes=None):
             k_label = CLASSES.index(label)
             conf = float(probs[:, :, k_label][piece].mean())
             said = {m: round(float(v[:, :, k_label][piece].mean()), 3) for m, v in (votes or {}).items()}
-            for p in polygons(piece, scale, size, tol):
+            exact = next((corners for m, corners in squared if label == 'building' and (m & piece).sum() > 0.9 * piece.sum()), None)
+            shapes = [{'polygon': [[round(float(x) / scale, 1), round(float(y) / scale, 1)] for x, y in exact]}] if exact is not None else polygons(piece, scale, size, tol)
+            if label == 'path':
+                shapes = path_lines(piece, scale, size, tol) or shapes
+            for p in shapes:
                 region = {'polygon': p['polygon'], 'label': ZONE_KIND[label], 'model_label': label, 'role': 'zone', 'confidence': round(conf, 3)}
+                if 'line' in p:
+                    region['line'], region['width'] = p['line'], p['width']
                 if said:
                     region['votes'] = said
                 regions.append(region)
@@ -271,6 +490,29 @@ def build_zones(image, probs, size, trees=None, votes=None):
     for x, y in taken:
         regions.append(point_region(x / scale, y / scale, 'tree', float(probs[y, x, CLASSES.index('tree')]), crown / scale))
     return regions
+
+
+def path_lines(piece, scale, size, tol):
+    """A path area as centre-line segments: each line gets the part of the area closest to it
+    (so pieces never overlap) and the path's average width."""
+    h, w = piece.shape
+    lines, width = centre_lines(piece, (h, w))
+    if not lines:
+        return []
+    near = []
+    for line in lines:
+        drawn = np.full((h, w), 255, np.uint8)
+        cv2.polylines(drawn, [np.round(line).astype(np.int32)], False, 0, 1)
+        near.append(cv2.distanceTransform(drawn, cv2.DIST_L2, 3))
+    owner = np.argmin(np.stack(near), axis=0)
+    w0, h0 = size
+    snap = lambda v, top: 0.0 if v <= 1.5 else float(top) if v >= top - 1.5 else round(float(v), 1)
+    out = []
+    for i, line in enumerate(lines):
+        for p in polygons(piece & (owner == i), scale, size, tol)[:1]:
+            out.append({'polygon': p['polygon'], 'width': round(width / scale, 1),
+                        'line': [[snap(x / scale, w0), snap(y / scale, h0)] for x, y in line]})
+    return out
 
 
 def point_region(x, y, label, confidence, size):

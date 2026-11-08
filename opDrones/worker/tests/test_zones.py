@@ -67,8 +67,22 @@ class ZonesTest(unittest.TestCase):
     def test_polygons_and_points(self):
         for kind in ('building', 'path', 'road', 'grass'):
             self.assertTrue(self.of(kind), kind)
-        self.assertEqual(self.of('path')[0]['label'], 'pavement')     # full width kept as an area
+        self.assertEqual(self.of('path')[0]['label'], 'path')         # erfMap's line kind, with a width
         self.assertEqual([p['label'] for p in self.points], ['tree'])
+
+    def test_paths_become_straight_centre_lines_with_width(self):
+        paths = self.of('path')
+        self.assertTrue(all('line' in r for r in paths))
+        lines = [np.array(r['line']) for r in paths]
+        main = max(lines, key=lambda l: np.ptp(l[:, 1]))              # the path running down from the top edge
+        self.assertEqual(main[:, 1].min(), 0, 'carried to the photo edge')
+        self.assertTrue(np.all(np.abs(main[:, 0] - 640) < 10), 'on the centre of the path, x = 640')
+        self.assertLessEqual(len(main), 3, 'a straight path is one or two straight segments')
+        branch = [l for l in lines if np.ptp(l[:, 0]) > 200]
+        self.assertTrue(branch, 'the branch has its own line')
+        self.assertTrue(950 < branch[0][:, 0].max() < 1020, 'the branch line stops at its visible end, x = 1000')
+        self.assertTrue(np.all(np.abs(branch[0][:, 1] - 830) < 12))
+        self.assertAlmostEqual(paths[0]['width'], 80, delta=12)
 
     def test_zones_do_not_overlap(self):
         masks = [(r['model_label'], raster(r['polygon'], trim=True)) for r in self.zones]
@@ -192,6 +206,49 @@ class OutlineTest(unittest.TestCase):
         lawn[900:1200, 700:840] = 1
         self.assertLess((path & lawn).sum(), 0.02 * lawn.sum(), 'the path spreads onto the lawn')
         self.assertGreater(path[0:1100, 610:670].mean(), 0.9, 'the path itself is kept')
+
+
+class BuildingTest(unittest.TestCase):
+    @staticmethod
+    def angles(poly):
+        p = np.asarray(poly, float)
+        out = []
+        for i in range(len(p)):
+            a, b = p[i - 1] - p[i], p[(i + 1) % len(p)] - p[i]
+            out.append(np.degrees(np.arccos(np.dot(a, b) / np.linalg.norm(a) / np.linalg.norm(b))))
+        return out
+
+    def check(self, shape, corners_expected):
+        rng = np.random.default_rng(3)
+        mask = np.zeros((600, 800), np.uint8)
+        cv2.fillPoly(mask, [shape.astype(np.int32)], 1)
+        truth = mask > 0
+        wobbly = cv2.GaussianBlur(mask.astype(np.float32) + rng.normal(0, 0.25, mask.shape).astype(np.float32), (0, 0), 6) > 0.5   # rounded, ragged trace
+        corners = cz.square_up(wobbly)
+        self.assertIsNotNone(corners)
+        self.assertEqual(len(corners), corners_expected)
+        for a in self.angles(corners):
+            self.assertAlmostEqual(a, 90, delta=1)
+        fitted = np.zeros_like(mask)
+        cv2.fillPoly(fitted, [np.round(corners).astype(np.int32)], 1)
+        self.assertGreater((truth & (fitted > 0)).sum() / (truth | (fitted > 0)).sum(), 0.95)
+
+    def test_tilted_rectangle_gets_square_corners(self):
+        self.check(cv2.boxPoints(((400, 300), (360, 200), 17)), 4)
+
+    def test_tilted_l_shape_keeps_its_six_square_corners(self):
+        L = np.array([[0, 0], [300, 0], [300, 120], [130, 120], [130, 260], [0, 260]], float) - [150, 130]
+        t = np.radians(-25)
+        R = np.array([[np.cos(t), -np.sin(t)], [np.sin(t), np.cos(t)]])
+        self.check(L @ R.T + [400, 300], 6)
+
+    def test_scene_building_comes_out_square(self):
+        image, probs, label = curved_scene()                            # its building is tilted about 13 degrees
+        building = [r for r in cz.build_zones(image, probs, (W, H)) if r.get('model_label') == 'building']
+        self.assertEqual(len(building), 1)
+        self.assertEqual(len(building[0]['polygon']), 4)
+        for a in self.angles(building[0]['polygon']):
+            self.assertAlmostEqual(a, 90, delta=1.5)
 
 
 class CouncilTest(unittest.TestCase):
