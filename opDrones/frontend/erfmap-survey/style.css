@@ -1,0 +1,401 @@
+/* erfMap survey workspace.
+   One layout for both colour modes; only the tokens below change. The map keeps its
+   real colours (greens, oranges, blues) in both modes: only the canvas around it darkens.
+
+   Layout (desktop): app bar, menu row, then the map fills the window. Floating on the map:
+   the session chip and toolbar along the top, the tool panel docked on the left, status and
+   legend bottom-left, zoom and the 3D walk button bottom-right.
+   Phones: the same pieces, with the tool panel as a bottom sheet. */
+
+:root {
+  color-scheme: dark;
+  --bg: #0e1110;
+  --canvas: #111513;
+  --canvas-dot: #2a322e;
+  --surface: #171b19;
+  --surface-2: #1f2522;
+  --surface-3: #283029;
+  --line: #2e3632;
+  --line-strong: #43504a;
+  --text: #e7ece9;
+  --muted: #9aa7a1;
+  --faint: #6f7c76;
+  --accent: #b9e283;
+  --accent-ink: #152107;
+  --accent-soft: #b9e2831f;
+  --walk: #f2a54a;
+  --walk-ink: #2a1600;
+  --danger: #ef7b6b;
+  --shadow: 0 10px 30px #00000059;
+  --radius: 10px;
+  --radius-sm: 7px;
+  --gap: 12px;
+  --edge: 16px;
+  --app-bar: 56px;
+  --menu-row: 38px;
+  --top: calc(var(--app-bar) + var(--menu-row));
+  --panel-w: 320px;
+  --sheet-h: min(52dvh, 440px);
+  --font: "Inter", "Helvetica Neue", Arial, system-ui, sans-serif;
+  --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+body.theme-light {
+  color-scheme: light;
+  --bg: #eef2f0;
+  --canvas: #f3f6f4;
+  --canvas-dot: #c9d4cf;
+  --surface: #ffffff;
+  --surface-2: #f2f5f3;
+  --surface-3: #e5ece8;
+  --line: #d8e0dc;
+  --line-strong: #b9c6c0;
+  --text: #1d2a24;
+  --muted: #5d6d66;
+  --faint: #86948e;
+  --accent: #3f7d2c;
+  --accent-ink: #ffffff;
+  --accent-soft: #3f7d2c1a;
+  --walk: #c96a12;
+  --walk-ink: #ffffff;
+  --danger: #b4423a;
+  --shadow: 0 8px 26px #1d2a2426;
+}
+
+* { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; }
+body {
+  margin: 0; overflow: hidden; background: var(--bg); color: var(--text);
+  font: 14px/1.45 var(--font); -webkit-font-smoothing: antialiased;
+}
+h1, h2, h3, h4, p { margin: 0; }
+small { color: var(--muted); font-size: 11px; letter-spacing: .06em; }
+
+/* ------------------------------------------------------------------ controls */
+button, select {
+  font: inherit; color: var(--text); cursor: pointer;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--radius-sm);
+  padding: 7px 12px; transition: background .12s, border-color .12s, color .12s;
+}
+button:hover:not(:disabled), select:hover { background: var(--surface-3); border-color: var(--line-strong); }
+button:disabled { opacity: .45; cursor: default; }
+button:focus-visible, select:focus-visible, summary:focus-visible, input:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px;
+}
+.active, button.active, button[aria-pressed="true"] {
+  background: var(--accent-soft); border-color: var(--accent); color: var(--text);
+}
+input { accent-color: var(--accent); }
+select, .wide, input[type=range] { width: 100%; }
+input:not([type=checkbox]):not([type=radio]):not([type=range]):not([type=color]) {
+  font: inherit; color: var(--text); background: var(--surface); border: 1px solid var(--line);
+  border-radius: var(--radius-sm); padding: 7px 9px;
+}
+
+/* ------------------------------------------------------------------ app bar */
+header {
+  position: fixed; z-index: 20; inset: 0 0 auto 0; height: var(--app-bar);
+  display: flex; align-items: center; gap: 14px; padding: 0 var(--edge);
+  background: var(--surface); border-bottom: 1px solid var(--line);
+}
+header .brand {
+  flex-shrink: 0; text-decoration: none;
+  font: 900 26px/1 "Arial Black", Arial, sans-serif; letter-spacing: -.09em; padding: 0 .12em .06em 0;
+  background: url(leaves.svg) center/44px 32px; -webkit-background-clip: text; background-clip: text; color: transparent;
+}
+header .title { min-width: 0; padding-left: 14px; border-left: 1px solid var(--line); }
+header .title small { display: block; font: 600 9px/1.3 var(--mono); letter-spacing: .16em; color: var(--faint); }
+header .title h1 { font-size: 17px; font-weight: 650; letter-spacing: -.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+header .title p { font: 11px var(--mono); color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+header .spacer { flex: 1; }
+header button { white-space: nowrap; }
+header #save { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 650; }
+header #save:hover:not(:disabled) { filter: brightness(1.06); background: var(--accent); }
+
+/* ------------------------------------------------------------------ menu row */
+#documentMenus {
+  position: fixed; z-index: 19; top: var(--app-bar); left: 0; right: 0; height: var(--menu-row);
+  display: flex; align-items: center; gap: 2px; padding: 0 calc(var(--edge) - 6px);
+  background: var(--surface); border-bottom: 1px solid var(--line);
+}
+#documentMenus details { position: relative; }
+#documentMenus summary {
+  list-style: none; cursor: pointer; padding: 5px 10px; border-radius: 6px; color: var(--muted); font-size: 13px;
+}
+#documentMenus summary::-webkit-details-marker { display: none; }
+#documentMenus summary:hover, #documentMenus details[open] > summary { background: var(--surface-2); color: var(--text); }
+.menu-popover {
+  position: absolute; top: calc(100% + 4px); left: 0; z-index: 30; min-width: 220px; padding: 6px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow);
+}
+.menu-popover button { display: block; width: 100%; text-align: left; border: 0; background: transparent; padding: 8px 10px; font-size: 13px; }
+.menu-popover button:hover:not(:disabled) { background: var(--surface-2); }
+.menu-settings label { display: flex; align-items: center; gap: 8px; padding: 8px 10px; font-size: 13px; cursor: pointer; }
+.menu-settings input { margin: 0; }
+.theme-switch {
+  margin-left: auto; display: flex; gap: 2px; padding: 2px;
+  background: var(--surface-2); border: 1px solid var(--line); border-radius: 999px;
+}
+.theme-switch button { border: 0; background: transparent; border-radius: 999px; padding: 3px 12px; font-size: 12px; color: var(--muted); }
+.theme-switch button[aria-pressed="true"] { background: var(--surface); color: var(--text); box-shadow: 0 1px 3px #0003; border: 0; }
+
+/* ------------------------------------------------------------------ map */
+main { position: fixed; inset: var(--top) 0 0 0; }
+.workspace, .workspace article { display: contents; }
+#surface {
+  position: fixed; inset: var(--top) 0 0 0;
+  background-color: var(--canvas);
+  background-image: radial-gradient(var(--canvas-dot) 1px, transparent 1.2px); background-size: 20px 20px;
+}
+#map, #walk { display: block; width: 100%; height: 100%; touch-action: none; user-select: none; }
+#map text { font-family: var(--font); font-variant-numeric: tabular-nums; pointer-events: none; }
+#walk { cursor: grab; image-rendering: auto; }
+#walk:active { cursor: grabbing; }
+#crewOverlay { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; overflow: hidden; }
+#crewOverlay text, .remote-cursor text { font: 600 12px var(--font); paint-order: stroke; stroke: #fff; stroke-width: 1px; stroke-linejoin: round; }
+body.walking #crewOverlay { display: none; }
+body.walking #surface { background: #0b0d0c; }
+.placing-walker #map { cursor: crosshair !important; }
+
+/* Floating panels share one look. */
+#sessionPanel, .bar, .workspace aside, footer, .legend, .badge, .nav, #walker {
+  position: fixed; z-index: 10;
+  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow);
+  -webkit-backdrop-filter: blur(8px); backdrop-filter: blur(8px);
+}
+
+/* ------------------------------------------------------------------ session chip + toolbar */
+#sessionPanel { top: calc(var(--top) + var(--gap)); left: var(--edge); padding: 0; }
+#sessionToggle { height: 44px; border: 0; background: transparent; font: 600 13px var(--mono); white-space: nowrap; padding: 0 14px; }
+#sessionDetails {
+  position: absolute; top: calc(100% + 6px); left: 0; width: 250px; padding: 12px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow);
+}
+#sessionDetails p { color: var(--muted); margin: 4px 0 8px; font-size: 12px; }
+.session-code { display: flex; align-items: center; gap: 8px; }
+.session-code small { margin-right: auto; font-size: 9px; letter-spacing: .14em; }
+.session-code strong { font: 700 22px/1 var(--mono); letter-spacing: .15em; }
+.session-roster { display: flex; flex-wrap: wrap; gap: 5px; margin: 9px 0; }
+.session-person { display: inline-flex; align-items: center; gap: 5px; padding: 3px 7px; border: 1px solid var(--line); border-radius: 999px; font-size: 11px; }
+.session-person i { width: 8px; height: 8px; background: var(--person-color); border-radius: 50%; }
+#sessionDetails #leaveSession { font-size: 11px; padding: 4px 8px; }
+
+.bar {
+  top: calc(var(--top) + var(--gap)); left: 150px; right: var(--edge); height: 44px;
+  display: flex; align-items: center; gap: 4px; padding: 4px 6px; overflow-x: auto; scrollbar-width: none;
+}
+.bar::-webkit-scrollbar { display: none; }
+.bar > button, .bar .tabs button { flex-shrink: 0; border: 0; background: transparent; padding: 7px 11px; border-radius: 7px; color: var(--muted); }
+.bar > button:hover:not(:disabled), .bar .tabs button:hover { background: var(--surface-2); color: var(--text); }
+.bar > button.active, .bar > button[aria-pressed="true"], .bar .tabs button.active {
+  background: var(--accent-soft); color: var(--text); box-shadow: inset 0 0 0 1px var(--accent);
+}
+#toolbarUndo { font-size: 17px; padding: 4px 10px; }
+.toolbar-divider { flex-shrink: 0; width: 1px; height: 22px; margin: 0 4px; background: var(--line); }
+.tabs { display: flex; gap: 2px; flex-shrink: 0; }
+.seg { display: flex; flex-shrink: 0; margin-left: auto; }
+#styleControl { flex-shrink: 0; margin: 0 6px 0 auto; font: 600 11px var(--mono); letter-spacing: .06em; color: var(--muted); white-space: nowrap; }
+
+/* The way into 3D: a labelled button in the toolbar and on the map. */
+#enter3d {
+  flex-shrink: 0; margin-left: auto; display: inline-flex; align-items: center; gap: 7px;
+  background: var(--walk); color: var(--walk-ink); border: 0; font-weight: 650; padding: 7px 14px; border-radius: 8px;
+}
+#enter3d:hover:not(:disabled) { background: var(--walk); filter: brightness(1.08); }
+#enter3d svg { width: 12px; height: 18px; fill: currentColor; }
+#enter3d[aria-pressed="true"] { box-shadow: 0 0 0 3px color-mix(in srgb, var(--walk) 35%, transparent); }
+body.walking #enter3d { display: none; }
+#flat { background: var(--walk); color: var(--walk-ink); border: 0; font-weight: 650; padding: 7px 14px; border-radius: 8px; }
+#flat:hover:not(:disabled) { background: var(--walk); filter: brightness(1.08); }
+
+/* ------------------------------------------------------------------ tool panel (docked left) */
+.workspace aside {
+  top: calc(var(--top) + 44px + 2 * var(--gap)); left: var(--edge); bottom: var(--edge); width: var(--panel-w);
+  display: flex; flex-direction: column; overflow: hidden; padding: 0;
+}
+#fold {
+  position: absolute; top: 12px; right: 12px; z-index: 1; padding: 4px 9px; font-size: 12px;
+  background: var(--surface-2); color: var(--muted);
+}
+#toolBody { flex: 1; overflow-y: auto; padding: 16px; overscroll-behavior: contain; }
+#toolBody > small { display: block; font: 600 9px var(--mono); letter-spacing: .16em; color: var(--faint); }
+#panelTitle { font-size: 20px; font-weight: 650; letter-spacing: -.01em; margin: 4px 70px 14px 0; }
+#panel h3 { font-size: 12px; font-weight: 650; color: var(--muted); margin: 18px 0 8px; text-transform: uppercase; letter-spacing: .06em; }
+#panel h3.metric { font-size: 22px; font-weight: 600; color: var(--text); text-transform: none; letter-spacing: -.01em; }
+#panel p { color: var(--muted); }
+#panel button { font-size: 13px; }
+.tools { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; }
+.tools button { text-align: left; }
+.wide { margin: 4px 0; }
+.row { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+.note { margin: 12px 0; padding: 10px 12px; font-size: 12.5px; color: var(--muted); background: var(--surface-2); border-left: 3px solid var(--accent); border-radius: 6px; }
+.metric, output, .keylabels { font-variant-numeric: tabular-nums; }
+.feature-catalog { display: grid; gap: 10px; }
+.feature-catalog section { min-width: 0; }
+.feature-catalog h3 { margin: 10px 0 6px !important; }
+.feature-catalog .catalog-subgroup { margin: 4px 0 8px; padding-left: 9px; border-left: 2px solid var(--line); }
+.feature-catalog .catalog-subgroup h4 { margin: 6px 0; color: var(--faint); font-size: 11px; font-weight: 600; }
+.feature-catalog .catalog-depth-2 { margin-left: 8px; }
+.feature-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.feature-grid button { min-width: 0; min-height: 36px; padding: 6px 8px; text-align: left; font-size: 12px !important; line-height: 1.25; white-space: normal; }
+.placement-ready { margin: 12px 0; padding: 10px 12px; border-radius: 8px; background: var(--accent-soft); font-size: 12.5px; }
+.placement-ready p { margin: 5px 0 8px; color: var(--muted); }
+.trail-toggle, .analysis-explainer, .analysis-summary { display: block; margin: 10px 0; color: var(--muted); font-size: 12.5px; }
+.analysis-slider { display: block; margin: 14px 0 8px; color: var(--muted); font-size: 12px; font-weight: 600; }
+.analysis-slider input { display: block; width: 100%; margin-top: 6px; }
+.analysis-legend { display: flex; align-items: center; justify-content: space-between; gap: 7px; margin: 8px 0 13px; color: var(--muted); font-size: 11px; }
+.analysis-gradient { display: block; flex: 1; height: 10px; border-radius: 5px; background: linear-gradient(90deg, #2875a2, #52a98f, #ecd56d, #d85b47); }
+.heatkey { height: 10px; border-radius: 5px; background: linear-gradient(90deg, #264c77, #2e92a2, #a2d4aa, #f4d062, #ea8349, #a62f50); }
+.keylabels { display: flex; justify-content: space-between; font: 11px var(--mono); color: var(--muted); margin: 5px 0 14px; }
+#map.analysis-map { background: var(--canvas); }
+.profile-chart { display: block; width: 100%; height: 125px; margin: 8px 0; background: var(--surface-2); border: 1px solid var(--line); border-radius: 6px; touch-action: auto; }
+.person-card { margin: 12px 0; padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2); }
+.person-card h3, .person-card p { margin: 0 0 5px; }
+.person-card strong { display: block; color: var(--accent); margin-top: 8px; font-size: 12px; }
+.person-card ol { padding-left: 19px; font-size: 12px; }
+.person-card li { padding: 3px 0; }
+.person-card small { white-space: nowrap; }
+.population-controls { display: flex; gap: 8px; align-items: center; margin: 8px 0 14px; }
+.population-controls label { display: flex; align-items: center; gap: 6px; }
+.population-controls input { width: 4.5em; }
+.population-controls button { font-size: 12px; }
+
+/* ------------------------------------------------------------------ status, legend, badge, zoom */
+footer {
+  left: var(--edge); bottom: calc(var(--edge) + 42px); max-width: min(620px, calc(100vw - 240px));
+  padding: 8px 12px; font-size: 12.5px; color: var(--muted); min-height: 0;
+}
+footer:empty { display: none; }
+.legend {
+  left: var(--edge); bottom: var(--edge); display: flex; flex-wrap: nowrap; white-space: nowrap; overflow: hidden; gap: 4px 14px;
+  max-width: min(620px, calc(100vw - 240px)); padding: 7px 12px; font-size: 11.5px; color: var(--muted);
+}
+.legend:empty { display: none; }
+body:has(.legend:empty) footer, body.walking footer { bottom: var(--edge); }
+/* With the tool panel docked on the left, status and legend move beside it. */
+body:not(.folded):not(.walking) footer, body:not(.folded):not(.walking) .legend {
+  left: calc(var(--edge) + var(--panel-w) + var(--gap)); max-width: min(620px, calc(100vw - var(--panel-w) - 290px));
+}
+.legend i { display: inline-block; width: 10px; height: 10px; margin-right: 6px; border-radius: 3px; vertical-align: -1px; }
+.badge {
+  right: var(--edge); top: calc(var(--top) + 44px + 2 * var(--gap)); padding: 5px 10px;
+  font: 600 10px var(--mono); letter-spacing: .12em; color: var(--muted); pointer-events: none;
+}
+.nav { right: calc(var(--edge) + 128px); bottom: var(--edge); display: flex; padding: 3px; }
+.nav button { border: 0; background: transparent; width: 36px; height: 36px; padding: 0; font-size: 18px; }
+
+/* Floating 3D button: the walker figure plus a label. Drag it onto the map, or click it and click a spot. */
+#walker {
+  right: var(--edge); bottom: var(--edge); height: 44px; padding: 0 16px 0 12px;
+  display: inline-flex; align-items: center; gap: 8px; cursor: grab; touch-action: none; user-select: none;
+  background: var(--walk); color: var(--walk-ink); border-color: transparent; font-weight: 650; border-radius: 999px;
+}
+#walker::after { content: 'Walk in 3D'; font-size: 13px; }
+#walker:hover:not(:disabled) { background: var(--walk); filter: brightness(1.08); }
+#walker svg, .walker-marker svg { width: 14px; height: 21px; display: block; fill: currentColor; pointer-events: none; }
+#walker[aria-pressed="true"] { box-shadow: 0 0 0 4px color-mix(in srgb, var(--walk) 35%, transparent); }
+#walker[aria-pressed="true"]::after { content: 'Pick a spot…'; }
+.walker-marker { position: fixed; z-index: 40; transform: translate(-50%, -100%); pointer-events: none; color: var(--walk); filter: drop-shadow(0 0 2px #000a); }
+.walker-marker svg { width: 24px; height: 36px; }
+.walker-marker::after { content: ''; position: absolute; bottom: -3px; left: 4px; width: 16px; height: 5px; border: 2px solid currentColor; border-radius: 50%; }
+.walker-marker.invalid { color: var(--danger); }
+/* While choosing a spot, say so on the map itself. */
+body.placing-walker #surface::after {
+  content: 'Click open ground on the map to start walking in 3D  ·  Esc cancels';
+  position: fixed; z-index: 15; left: 50%; top: calc(var(--top) + 44px + 2 * var(--gap)); transform: translateX(-50%);
+  padding: 8px 16px; border-radius: 999px; background: var(--walk); color: var(--walk-ink);
+  font-weight: 650; font-size: 13px; box-shadow: var(--shadow); pointer-events: none; white-space: nowrap;
+}
+
+/* ------------------------------------------------------------------ 3D walkthrough */
+body.walking .nav, body.walking .legend { display: none; }
+#pad { position: fixed; z-index: 12; right: var(--edge); bottom: var(--edge); display: flex; gap: 5px; }
+#pad button {
+  touch-action: none; min-width: 44px; min-height: 44px; font-weight: 700;
+  background: color-mix(in srgb, var(--surface) 92%, transparent); border: 1px solid var(--line-strong); box-shadow: var(--shadow);
+}
+#pad button[data-walk="shift"], #pad button[data-walk="jump"] { background: var(--walk); color: var(--walk-ink); border-color: transparent; font-size: 12px; }
+#pad button:active { transform: translateY(2px); }
+
+/* ------------------------------------------------------------------ properties dialog */
+#propertiesDialog {
+  width: min(680px, calc(100vw - 28px)); max-height: min(86dvh, 820px); margin: auto; padding: 22px; overflow: auto;
+  color: var(--text); background: var(--surface); border: 1px solid var(--line); border-radius: 14px; box-shadow: var(--shadow);
+}
+#propertiesDialog::backdrop { background: #000a; backdrop-filter: blur(3px); }
+.property-dialog-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 15px; }
+.property-dialog-head h2 { margin: 3px 0 0; font-size: 22px; font-weight: 650; }
+#closeProperties { border: 0; font-size: 22px; line-height: 1; padding: 6px 11px; }
+#propertiesMessage { color: var(--danger); font-size: 13px; }
+#propertiesMessage:not(:empty) { margin: 0 0 12px; padding: 8px 10px; border-radius: 6px; background: color-mix(in srgb, var(--danger) 12%, transparent); }
+.property-intro { margin: -7px 0 12px; color: var(--muted); font-size: 12.5px; }
+.property-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.property-grid label, .property-location > label { display: flex; flex-direction: column; gap: 5px; color: var(--muted); font-size: 12px; font-weight: 600; }
+.property-grid input:not([type=checkbox]), .property-grid select, .property-location input, .property-location select { width: 100%; min-width: 0; }
+.property-grid input[type=color] { height: 37px; padding: 3px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); }
+.color-toggle span:last-child { display: flex; align-items: center; gap: 6px; }
+.tag-preview { display: flex; align-items: center; gap: 9px; margin: 12px 0 16px; color: var(--muted); font-size: 11px; }
+#tag_swatch { width: 20px; height: 20px; border: 1px solid var(--line-strong); border-radius: 4px; }
+.property-specs, .property-location { margin-top: 16px; padding-top: 13px; border-top: 1px solid var(--line); }
+.property-specs h3, .property-location h3 { margin: 0 0 9px; font-size: 13px; }
+.property-help, .property-location p { margin: 0 0 9px; color: var(--muted); font-size: 12px; }
+.property-location .coordinate-grid { max-width: 360px; }
+.coordinate-list { max-height: 145px; margin: 0 0 12px; padding: 10px 12px; overflow: auto; border: 1px solid var(--line); border-radius: 6px; background: var(--surface-2); color: var(--muted); font: 12px/1.6 var(--mono); white-space: pre-wrap; }
+.property-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; padding-top: 14px; border-top: 1px solid var(--line); }
+#propertiesPanelFields .property-grid { grid-template-columns: minmax(0, 1fr); }
+#propertiesPanelFields .property-specs, #propertiesPanelFields .property-location { margin-top: 12px; padding-top: 10px; }
+#applyProperties, #applyPanelProperties { background: var(--accent); border-color: var(--accent); color: var(--accent-ink); font-weight: 650; }
+
+/* ------------------------------------------------------------------ tablets: panel floats over the map */
+@media (max-width: 1100px) {
+  :root { --panel-w: 300px; }
+}
+
+/* ------------------------------------------------------------------ phones: tool panel becomes a bottom sheet */
+@media (max-width: 749px) {
+  :root { --edge: 8px; --gap: 8px; --app-bar: 52px; --menu-row: 36px; }
+  header { gap: 10px; }
+  header .brand { font-size: 20px; background-size: 34px 25px; }
+  header .title { padding-left: 10px; }
+  header .title small, header .title p { display: none; }
+  header .title h1 { font-size: 15px; }
+  header #import { display: none; }
+  header #save { padding: 6px 10px; font-size: 12px; }
+  #documentMenus summary { padding: 5px 8px; font-size: 12.5px; }
+  #documentMenus details:last-of-type .menu-popover { left: auto; right: 0; }
+  #lightMode, #darkMode { font-size: 0 !important; padding: 3px 9px !important; }
+  #lightMode::after { content: 'Light'; font-size: 11px; }
+  #darkMode::after { content: 'Dark'; font-size: 11px; }
+  #sessionToggle { height: 42px; padding: 0 10px; font-size: 12px; }
+  .bar { left: 112px; height: 42px; }
+  .bar > button, .bar .tabs button { padding: 6px 9px; font-size: 13px; }
+  #enter3d { padding: 6px 10px; }
+  .badge { display: none; }
+  .workspace aside {
+    top: auto; left: 0; right: 0; bottom: 0; width: auto; height: var(--sheet-h);
+    border-radius: 16px 16px 0 0; border-bottom: 0;
+  }
+  .workspace aside::before { content: ''; display: block; width: 40px; height: 4px; margin: 8px auto 0; border-radius: 2px; background: var(--line-strong); }
+  #fold { top: 14px; }
+  #toolBody { padding: 8px 14px 16px; }
+  #panelTitle { font-size: 18px; }
+  /* With the sheet open, the map's floating controls sit above it. */
+  body:not(.folded) footer, body:not(.folded) .legend { display: none; }
+  body:not(.folded) .nav, body:not(.folded) #pad { bottom: calc(var(--sheet-h) + 10px); }
+  .legend { display: none; }
+  footer, body:not(.folded):not(.walking) footer { left: var(--edge); max-width: calc(100vw - 2 * var(--edge)); bottom: calc(var(--edge) + 54px); font-size: 12px; }
+  body:not(.folded) #walker { display: none; }
+  .nav { right: auto; left: var(--edge); }
+  #walker { padding: 0 14px 0 11px; }
+  body.placing-walker #surface::after { content: 'Tap open ground to walk in 3D  ·  tap the button to cancel'; font-size: 12px; white-space: normal; width: max-content; max-width: calc(100vw - 24px); text-align: center; border-radius: 14px; }
+  .feature-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  #pad { gap: 4px; }
+  #pad button { min-width: 42px; min-height: 42px; padding: 6px; }
+  .property-grid { grid-template-columns: 1fr; }
+  #propertiesDialog { padding: 16px; }
+}
+@media (max-width: 420px) {
+  .feature-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
+@media (prefers-reduced-motion: reduce) { * { transition: none !important; } }

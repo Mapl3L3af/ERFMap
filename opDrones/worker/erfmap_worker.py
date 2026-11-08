@@ -23,6 +23,8 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from capture_profile import job_capture
+from map_reference import job_reference, terrain_check
 
 try:
     import numpy as np
@@ -173,6 +175,7 @@ def capabilities():
         'opencv': cv2.__version__ if cv2 is not None else None,
         'segmenter': zones_command(),
         'classifier': classifier_command(),
+        'reconstructor': bool(os.environ.get('ERFMAP_RECONSTRUCTOR') or os.environ.get('ERFMAP_NODEODM_URL')),
     }
 
 
@@ -390,7 +393,7 @@ def photo_frames(job, out):
             image = cv2.resize(image, (round(image.shape[1] * scale), round(image.shape[0] * scale)), interpolation=cv2.INTER_AREA)
         path = out / ('f%04d.jpg' % (i + 1))
         cv2.imwrite(str(path), image, [cv2.IMWRITE_JPEG_QUALITY, 92])
-        frames.append({'id': path.stem, 'index': i, 'time_s': None, 'source': photo['name'], 'image': rel(job, path),
+        frames.append({'id': path.stem, 'index': i, 'time_s': None, 'source': photo['name'], 'original': photo['path'], 'image': rel(job, path),
                        'width': image.shape[1], 'height': image.shape[0], 'metrics': frame_metrics(image)})
         progress(.9 * (i + 1) / len(photos), 'Scoring photo %d of %d' % (i + 1, len(photos)))
     return frames
@@ -402,7 +405,8 @@ def stage_frames(job):
         out = stage_dir(job, 'frames')
         for old in out.glob('f*.jpg'):
             old.unlink()
-        return score_frames(photo_frames(job, out), None)
+        config = (read_json(Path(job) / 'job.json') or {}).get('reconstruction') or {}
+        return score_frames(photo_frames(job, out), None, allow_oblique=config.get('enabled', False))
     ffmpeg = tool('ffmpeg')
     if not ffmpeg:
         raise Unavailable('FFmpeg was not found on PATH. Install FFmpeg or set ERFMAP_FFMPEG.')
@@ -442,7 +446,7 @@ def stage_frames(job):
     return score_frames(frames, fps)
 
 
-def score_frames(frames, fps):
+def score_frames(frames, fps, allow_oblique=False):
     sharp = sorted(f['metrics']['sharpness'] for f in frames)
     median = sharp[len(sharp) // 2]
     blur_limit = max(25.0, 0.35 * median)
@@ -456,7 +460,7 @@ def score_frames(frames, fps):
             flags.append('overexposed')
         if m['texture'] < 0.008:
             flags.append('low texture')
-        if m['sky_band']:
+        if m['sky_band'] and not allow_oblique:
             flags.append('tilted (sky visible)')
         f['flags'] = flags
         f['usable'] = not flags
@@ -469,13 +473,21 @@ def score_frames(frames, fps):
             f['usable'] = not f['flags']
     usable = [f for f in frames if f['usable']]
     warnings = ['Camera tilt is estimated only from sky visible in frame; there is no gimbal telemetry to measure it.']
+    if allow_oblique:
+        warnings.append('Oblique photographs are allowed for photogrammetry. Building-side coverage is not automatically verified.')
     if not usable:
-        raise RuntimeError('None of the %d %s are usable (all blurry, dark, tilted or featureless).' % (len(frames), 'photos' if photos else 'frames'))
+        warnings.append('No usable captures remain. Capture checks will report the exclusions before further processing.')
     if len(usable) < 3 and not photos:
         warnings.append('Only %d usable frames. Cross-frame merging needs overlap between several frames.' % len(usable))
     return {'status': 'needs_review' if len(usable) < len(frames) / 2 or (len(usable) < 3 and not photos) else 'complete',
             'summary': '%d of %d %s usable' % (len(usable), len(frames), 'photos' if photos else 'frames'),
             'sample_fps': fps, 'blur_limit': 25 if photos else round(blur_limit, 1), 'frames': frames, 'warnings': warnings}
+
+
+def stage_capture(job):
+    need_cv()
+    from capture_checks import analyze
+    return analyze(Path(job), stage_result(job, 'frames')['frames'], stage_dir(job, 'capture'), progress)
 
 
 # ---------------------------------------------------------------- 2. correction
@@ -491,6 +503,12 @@ def stage_correction(job):
     need_cv()
     frames = [f for f in stage_result(job, 'frames')['frames'] if f['usable']]
     out = stage_dir(job, 'correction')
+    meta = read_json(Path(job) / 'job.json') or {}
+    sheet = meta.get('media') == 'photos' and meta.get('sceneMode') != 'stitched'
+    if os.environ.get('ERFMAP_NODEODM_URL') and not os.environ.get('ERFMAP_RECONSTRUCTOR') and not sheet:
+        from nodeodm_adapter import orthophoto_stage
+        progress(.05, 'Reconstructing ODM orthophoto before calibration and labeling')
+        return orthophoto_stage({'job': str(Path(job).resolve()), 'frames': stage_result(job, 'frames')})
     camera = read_json(Path(job) / 'camera.json')
     lens = {'status': 'unavailable', 'reason': 'No camera calibration supplied (camera.json with fx, fy, cx, cy and distortion coefficients). Frames are not lens-corrected.'}
     K = D = None
@@ -501,19 +519,18 @@ def stage_correction(job):
             lens = {'status': 'applied', 'reason': 'Undistorted with the supplied camera.json.'}
         except (KeyError, TypeError) as error:
             lens = {'status': 'failed', 'reason': 'camera.json is missing ' + str(error)}
-    clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
     corrected = []
     for i, f in enumerate(frames):
         image = imread(Path(job) / f['image'])
         if K is not None:
             image = cv2.undistort(image, K, D)
-        lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB)
-        lab[:, :, 0] = clahe.apply(lab[:, :, 0])
-        clean = cv2.fastNlMeansDenoisingColored(cv2.cvtColor(lab, cv2.COLOR_LAB2BGR), None, 3, 3, 7, 15)
-        path = out / (f['id'] + '.jpg')
-        cv2.imwrite(str(path), clean, [cv2.IMWRITE_JPEG_QUALITY, 88])
-        corrected.append({'id': f['id'], 'before': f['image'], 'after': rel(job, path), 'width': clean.shape[1], 'height': clean.shape[0]})
-        progress(.4 * (i + 1) / len(frames), 'Cleaning frame %d of %d' % (i + 1, len(frames)))
+        # Keep natural colour and texture for vegetation classification. Local
+        # contrast enhancement amplifies lawn texture; denoising can erase the
+        # fine canopy detail needed to distinguish trees from the ground.
+        path = out / (f['id'] + '.png')
+        cv2.imwrite(str(path), image)
+        corrected.append({'id': f['id'], 'before': f['image'], 'after': rel(job, path), 'width': image.shape[1], 'height': image.shape[0]})
+        progress(.4 * (i + 1) / len(frames), 'Preparing frame %d of %d' % (i + 1, len(frames)))
 
     photos = (read_json(Path(job) / 'job.json') or {}).get('media') == 'photos'
     if photos and (read_json(Path(job) / 'job.json') or {}).get('sceneMode') != 'stitched':
@@ -614,7 +631,7 @@ def stage_correction(job):
         progress(.8 + .2 * (n + 1) / len(to_ref), 'Building alignment preview')
     mosaic = (acc / np.maximum(weight, 1e-6)[:, :, None]).clip(0, 255).astype(np.uint8)
     mosaic[weight == 0] = (32, 32, 32)
-    cv2.imwrite(str(out / 'mosaic.jpg'), mosaic, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    cv2.imwrite(str(out / 'mosaic.png'), mosaic)
     aligned = len(to_ref)
     warnings = ['The alignment preview is a planar homography stitch, not an orthomosaic. Relief, tall objects and camera tilt cause displacement that is not corrected.']
     if lens['status'] != 'applied':
@@ -622,9 +639,9 @@ def stage_correction(job):
     if aligned < len(corrected):
         warnings.append('%d of %d usable frames could not be aligned to the reference frame (weak feature matches) and are left out of later stages.' % (len(corrected) - aligned, len(corrected)))
     return {'status': 'needs_review' if aligned < max(2, 0.6 * len(corrected)) else 'complete',
-            'summary': 'Cleaned %d frames, %d of them aligned in one preview (reference %s)' % (len(corrected), aligned, corrected[ref]['id']),
-            'lens': lens, 'cleanup': 'CLAHE contrast equalisation and light denoising', 'reference': corrected[ref]['id'],
-            'frames': corrected, 'links': links, 'mosaic': {'image': rel(job, out / 'mosaic.jpg'), 'width': W, 'height': H_, 'scale': s},
+            'summary': 'Prepared %d frames, %d of them aligned in one preview (reference %s)' % (len(corrected), aligned, corrected[ref]['id']),
+            'lens': lens, 'cleanup': 'Natural colour and texture preserved; lossless PNG output', 'reference': corrected[ref]['id'],
+            'frames': corrected, 'links': links, 'mosaic': {'image': rel(job, out / 'mosaic.png'), 'width': W, 'height': H_, 'scale': s},
             'warnings': warnings}
 
 
@@ -652,13 +669,13 @@ def photo_sheet(job, out, corrected, lens):
         c['to_mosaic'] = to_list(np.array([[s, 0, x0], [0, s, y0], [0, 0, 1]], dtype=np.float64))
         c['tile'] = [x0, y0, w, h]
         progress(.4 + .6 * (i + 1) / n, 'Laying out photo %d of %d' % (i + 1, n))
-    cv2.imwrite(str(out / 'mosaic.jpg'), sheet, [cv2.IMWRITE_JPEG_QUALITY, 88])
+    cv2.imwrite(str(out / 'mosaic.png'), sheet)
     warnings = ['Photos are not stitched together. Each photo is scaled by its own measured distance, so their positions relative to each other are unknown.']
     if lens['status'] != 'applied':
         warnings.append(lens['reason'])
-    return {'status': 'complete', 'summary': 'Cleaned %d photos and laid them out side by side for per-photo calibration' % n,
-            'layout': 'sheet', 'lens': lens, 'cleanup': 'CLAHE contrast equalisation and light denoising', 'reference': None,
-            'frames': corrected, 'links': [], 'mosaic': {'image': rel(job, out / 'mosaic.jpg'), 'width': W, 'height': H_, 'scale': s},
+    return {'status': 'complete', 'summary': 'Prepared %d photos and laid them out side by side for per-photo calibration' % n,
+            'layout': 'sheet', 'lens': lens, 'cleanup': 'Natural colour and texture preserved; lossless PNG output', 'reference': None,
+            'frames': corrected, 'links': [], 'mosaic': {'image': rel(job, out / 'mosaic.png'), 'width': W, 'height': H_, 'scale': s},
             'warnings': warnings}
 
 
@@ -853,7 +870,7 @@ def stage_markers(job):
 # ---------------------------------------------------------------- 4. regions
 def keyframes(job, limit=None):
     corr = stage_result(job, 'correction')
-    if (read_json(Path(job) / 'job.json') or {}).get('sceneMode') == 'stitched':
+    if corr.get('mosaic', {}).get('source') == 'NodeODM' or (read_json(Path(job) / 'job.json') or {}).get('sceneMode') == 'stitched':
         m = corr['mosaic']
         return [{'id': 'scene', 'after': m['image'], 'width': m['width'], 'height': m['height'], 'to_mosaic': np.eye(3).tolist()}]
     frames = [f for f in corr['frames'] if 'to_mosaic' in f]
@@ -908,17 +925,17 @@ def stage_regions(job):
     frames = keyframes(job)
     segmenter = zones_command()
     builtin = bool(segmenter) and 'clip_zones.py' in segmenter and not os.environ.get('ERFMAP_SEGMENTER')
-    method = ('Model council (CLIP, SegFormer and DeepForest, whichever are installed) in two stages: zone polygons in priority order (buildings, then paths and roads, then grass as the fallback), then points for trees, lamp posts and benches' if builtin
+    method = ('Model council (CLIP, SegFormer and DeepForest, whichever are installed): one full-map grass background beneath detected buildings, paths, roads and tree points, then lamp posts and benches' if builtin
               else 'external segmenter: ' + segmenter if segmenter else 'baseline colour clustering (OpenCV k-means). Not SAM 2.')
     regions, model = [], None
     if segmenter:
         progress(.1, 'Mapping zones and points with the model council (up to a minute per photo)' if builtin else 'Running external segmenter')
-        reply = external(segmenter, {'job': str(Path(job).resolve()), 'phase': 'zones', 'frames': [{'id': f['id'], 'image': str((Path(job) / f['after']).resolve())} for f in frames]}, 'Segmenter')
+        reply = external(segmenter, {'job': str(Path(job).resolve()), 'captureProfile': job_capture(job), 'mapReference': job_reference(job), 'phase': 'zones', 'frames': [{'id': f['id'], 'image': str((Path(job) / f['after']).resolve())} for f in frames]}, 'Segmenter')
         model = reply.get('model')
         for r in reply.get('regions', []):
             if r.get('frame') in {f['id'] for f in frames} and len(r.get('polygon', [])) >= 3:
                 region = {'frame': r['frame'], 'polygon': r['polygon'], 'area_px': polygon_area(r['polygon']), 'mean_rgb': r.get('mean_rgb'), 'score': r.get('score')}
-                for key in ('label', 'model_label', 'confidence', 'role', 'point', 'votes', 'line', 'width'):
+                for key in ('label', 'model_label', 'confidence', 'role', 'point', 'votes', 'line', 'width', 'widths'):
                     if r.get(key) is not None:
                         region[key] = r[key]
                 regions.append(region)
@@ -1000,7 +1017,7 @@ def stage_classification(job):
                 'reason': 'Install the free CLIP classifier (pip install open_clip_torch) or set ERFMAP_CLASSIFIER to a command that implements the classifier contract in worker/README.md. Until then, label regions by hand in Review.',
                 'model': None, 'predictions': predictions, 'uncertain_below': UNCERTAIN_BELOW, 'warnings': []}
     progress(.4, 'Running classifier')
-    reply = external(classifier, {'labels': labels['labels'], 'regions': payload}, 'Classifier')
+    reply = external(classifier, {'captureProfile': job_capture(job), 'labels': labels['labels'], 'regions': payload}, 'Classifier')
     by_id = {p.get('id'): p for p in reply.get('predictions', [])}
     def kind_of(r):
         label = by_id.get(r['id'], {}).get('label') or by_id.get(r['id'], {}).get('kind')
@@ -1130,7 +1147,8 @@ def stage_merging(job):
         items.append({'region': r, 'poly': poly, 'mask': mask.astype(bool), 'pred': preds.get(r['id'], {}), 'role': r.get('role'),
                       'point': apply_h(to_mosaic[r['frame']], [r['point']])[0] if r.get('point') else None,
                       'line': apply_h(to_mosaic[r['frame']], r['line']) if r.get('line') else None,
-                      'width': r['width'] * math.sqrt(abs(np.linalg.det(np.asarray(to_mosaic[r['frame']], float)[:2, :2]))) if r.get('width') else None})
+                      'width': r['width'] * math.sqrt(abs(np.linalg.det(np.asarray(to_mosaic[r['frame']], float)[:2, :2]))) if r.get('width') else None,
+                      'widths': [v * math.sqrt(abs(np.linalg.det(np.asarray(to_mosaic[r['frame']], float)[:2, :2]))) for v in r.get('widths', [])]})
     items.sort(key=lambda it: -it['mask'].sum())
     clusters = []
     for n, it in enumerate(items):
@@ -1198,6 +1216,7 @@ def stage_merging(job):
         if traced:                                   # a centre line traced by the segmenter (paths)
             merged[-1]['line'] = traced[0]['line'].round(1).tolist()
             merged[-1]['width_px'] = round(float(traced[0]['width']), 1)
+            merged[-1]['widths_px'] = traced[0]['widths']
     if not zoned:
         merged = join_blocks(merged, size, s, per_image=corr.get('layout') == 'sheet')
     conflicts = sum(1 for m in merged if any(f.startswith('conflicting') or f.startswith('geometry') for f in m['flags']))
@@ -1330,7 +1349,7 @@ def geometry_per_image(job, merged, labels, calibration):
         if geometry == 'line' and g.get('line'):
             p = [to_m(q) for q in g['line']]
             width = round(g['width_px'] * i['k'] * m_common, 2)
-            note = 'Centre line fitted with straight segments; width is the average across the path, %.1f m.' % width
+            note = 'Centre line follows paving; local widths are measured along the path (typical %.1f m).' % width
         a, b = to_m(i['a']), to_m(i['b'])
         segment_m = i['metres']
         distance = segment_distance(poly.mean(axis=0), a, b)
@@ -1339,7 +1358,7 @@ def geometry_per_image(job, merged, labels, calibration):
         if distance > max(3 * segment_m, 0.25 * photo_w_m):
             flags.append('far from its photo\'s reference segment (%.0f m away); size less certain' % distance)
         features.append({'id': g['id'], 'kind': kind, 'predicted_kind': g['kind'], 'geometry': geometry, 'p': p,
-                         'region': poly.tolist(), 'width_m': width, 'pixel_polygon': g['polygon'], 'confidence': g['confidence'],
+                         'region': poly.tolist(), 'width_m': width, 'widths_m': [round(v * i['k'] * m_common, 2) for v in g.get('widths_px', [])], 'pixel_polygon': g['polygon'], 'confidence': g['confidence'],
                          'frames': g['frames'], 'flags': flags, 'note': note, 'area_m2': round(polygon_area(poly), 2),
                          'image': {'frame': i['frame'], 'source': i['source']},
                          'calibration': {'id': i['reference'], 'metres': round(i['metres'], 4), 'label': i['label'], 'segment_px': i['segment_px'],
@@ -1380,6 +1399,8 @@ def stage_geometry(job):
     m_per_px = float(np.median(estimates))
     spread = float(np.std(estimates) / m_per_px) if len(estimates) > 1 else None
     warnings = ['Locally scaled, unreferenced: coordinates are metres from an arbitrary origin, axes follow the reference frame (not north), and perspective, terrain and lens effects are not removed.']
+    if merged['mosaic'].get('source') == 'NodeODM':
+        warnings = ['ODM orthophoto with confirmed local scale. Export coordinates are local metres; survey accuracy and vertical alignment require independent control.']
     if len(estimates) == 1:
         warnings.append('Only one scale reference is confirmed. Scale is reliable near it only; distances far from it may be off.')
     if spread is not None and spread > 0.1:
@@ -1395,9 +1416,9 @@ def stage_geometry(job):
         if geometry == 'line' and g.get('line'):
             p = [[q[0] * m_per_px, q[1] * m_per_px] for q in g['line']]
             width = round(g['width_px'] * m_per_px, 2)
-            note = 'Centre line fitted with straight segments; width is the average across the path, %.1f m.' % width
+            note = 'Centre line follows paving; local widths are measured along the path (typical %.1f m).' % width
         features.append({'id': g['id'], 'kind': kind, 'predicted_kind': g['kind'], 'geometry': geometry, 'p': p,
-                         'region': poly.tolist(), 'width_m': width,
+                         'region': poly.tolist(), 'width_m': width, 'widths_m': [round(v * m_per_px, 2) for v in g.get('widths_px', [])],
                          'pixel_polygon': g['polygon'], 'confidence': g['confidence'], 'frames': g['frames'],
                          'flags': g['flags'] + ([] if g['kind'] else ['needs label']), 'note': note,
                          'area_m2': round(polygon_area(poly), 2)})
@@ -1414,7 +1435,7 @@ def stage_geometry(job):
             'extent_m': extent, 'mosaic': merged['mosaic'], 'features': features, 'evidence': stage_result(job, 'regions').get('evidence'), 'warnings': warnings}
 
 
-RUNNERS = {'probe': stage_probe, 'frames': stage_frames, 'correction': stage_correction, 'markers': stage_markers,
+RUNNERS = {'probe': stage_probe, 'frames': stage_frames, 'capture': stage_capture, 'correction': stage_correction, 'markers': stage_markers,
            'regions': stage_regions, 'classification': stage_classification, 'merging': stage_merging, 'geometry': stage_geometry}
 
 
@@ -1424,6 +1445,24 @@ def run(stage, job):
     started = time.time()
     try:
         result = RUNNERS[stage](job)
+        result['captureProfile'] = job_capture(job)
+        if stage == 'geometry' and result.get('scale') and result.get('mosaic'):
+            command = os.environ.get('ERFMAP_RECONSTRUCTOR')
+            if command or os.environ.get('ERFMAP_NODEODM_URL'):
+                from terrain import build_terrain
+                progress(.9, 'Reconstructing ground elevation')
+                payload = {'job': str(Path(job).resolve()), 'captureProfile': job_capture(job),
+                    'frames': stage_result(job, 'frames'), 'correction': stage_result(job, 'correction'),
+                    'calibration': read_json(Path(job) / 'calibration.json', {}),
+                    'scale': result['scale'], 'mosaic': result['mosaic']}
+                if command:
+                    terrain_data = external(command, payload, 'Reconstruction')
+                else:
+                    from nodeodm_adapter import run as run_nodeodm
+                    terrain_data = run_nodeodm(payload)
+                result['terrain'] = build_terrain(terrain_data, result['scale'], result['mosaic'])
+        if stage == 'geometry':
+            result['referenceTerrainCheck'] = terrain_check(job_reference(job), result)
     except Unavailable as error:
         result = {'status': 'unavailable', 'summary': str(error), 'reason': str(error), 'warnings': []}
     result['stage'] = stage

@@ -6,6 +6,7 @@ const {randomUUID, randomInt} = require('node:crypto');
 const {demo, restore, importSurvey} = require('./erfmap-survey/model');
 const changes = require('./erfmap-survey/changes');
 const {createIntake} = require('./intake/jobs');
+const {createTraining} = require('./intake/training');
 const directory = process.env.ERFMAP_DATA || path.join(__dirname, '.erfmap-data');
 fs.mkdirSync(directory, {recursive:true});
 const rooms = new Map();
@@ -41,11 +42,11 @@ function lease(room, member) {
     clearTimeout(member.timer);
     member.timer = setTimeout(() => drop(room,member),20000);
 }
-async function body(req) {
+async function body(req, limit = 16*1024*1024) {
     const chunks = []; let size = 0;
     for await (const chunk of req) {
         size += chunk.length;
-        if (size > 16*1024*1024) throw failure(413,'Project exceeds 16 MB.');
+        if (size > limit) throw failure(413,'Upload exceeds ' + limit/(1024*1024) + ' MB.');
         chunks.push(chunk);
     }
     try { return JSON.parse(Buffer.concat(chunks).toString() || '{}'); }
@@ -60,19 +61,21 @@ function createProject(site) {
     }
     throw failure(503,'No room codes available.');
 }
+const training = createTraining({directory, readBody:body});
 const intake = createIntake({directory, createProject, readBody: body});
 async function route(req,res) {
     const url = new URL(req.url,'http://localhost');
     const json = data => { res.setHeader('Content-Type','application/json'); res.end(JSON.stringify(data)); };
     if (!url.pathname.startsWith('/api/')) {
+        const studio = /^\/semantic-labeler(\/|$)/.test(url.pathname);
         const survey = /^\/(survey|erfmap-survey)(\/|$)/.test(url.pathname);
         const videoIntake = /^\/(intake|erfmap-intake)(\/|$)/.test(url.pathname);
-        if (/^\/(survey|erfmap-survey|erfmap-frontpage|intake|erfmap-intake)$/.test(url.pathname)) {
+        if (/^\/(survey|erfmap-survey|erfmap-frontpage|intake|erfmap-intake|semantic-labeler)$/.test(url.pathname)) {
             res.writeHead(302,{Location:url.pathname+'/'+url.search}); return res.end();
         }
-        const name = url.pathname.replace(/^\/(?:survey\/|erfmap-survey\/|erfmap-frontpage\/|intake\/|erfmap-intake\/)?/,'') || 'index.html';
+        const name = url.pathname.replace(/^\/(?:semantic-labeler\/|survey\/|erfmap-survey\/|erfmap-frontpage\/|intake\/|erfmap-intake\/)?/,'') || 'index.html';
         if (!/^[a-z0-9-]+\.(html|js|svg|css)$/.test(name)) throw failure(404,'Page unavailable.');
-        const target = path.join(__dirname,survey?'erfmap-survey':videoIntake?'erfmap-intake':'erfmap-frontpage',name);
+        const target = path.join(__dirname,studio?'semantic-labeler':survey?'erfmap-survey':videoIntake?'erfmap-intake':'erfmap-frontpage',name);
         if (!fs.existsSync(target)) throw failure(404,'Page unavailable.');
         res.setHeader('Content-Type', {html:'text/html',js:'text/javascript',css:'text/css',svg:'image/svg+xml'}[name.split('.').pop()]);
         return fs.createReadStream(target).pipe(res);
@@ -86,6 +89,7 @@ async function route(req,res) {
         catch (e) { throw failure(400,e.message || 'Invalid survey.'); }
         return json({code:createProject(site)});
     }
+    if (await training.route(req,res,url)) return;
     if (await intake.route(req,res,url)) return;
     const match = url.pathname.match(/^\/api\/projects\/(\d{4})\/(join|events|edit|presence|signal|leave|simulation)$/);
     if (!match) throw failure(404,'Unknown project address.');
@@ -158,6 +162,7 @@ const server=http.createServer((req,res)=>{
 });
 });
 function shutdown() {
+    training.stop();
     if (stopping) return;
     stopping = true;
     console.log('Stopping erfMap…');
@@ -174,6 +179,7 @@ function shutdown() {
         process.exit(0);
     }, 1000);
 }
+process.on('exit', () => training.stop());
 for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, shutdown);
 server.on('error', error => {
     if (error.code === 'EADDRINUSE') {

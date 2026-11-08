@@ -23,8 +23,11 @@ function createViewer(host, {image, width, height, hint = ''}) {
         if (api.redraw) api.redraw();
     }
     function fit() { box = [0, 0, width, height]; apply(); }
-    function focus(x0, y0, x1, y1, pad = 4) {
-        const w = Math.max(x1 - x0, 1) * pad, h = Math.max(y1 - y0, 1) * pad, cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+    // minSize (image px) keeps small features such as trees, lights and little patches
+    // in context instead of filling the whole view.
+    function focus(x0, y0, x1, y1, pad = 4, minSize = 0) {
+        const floor = Math.min(minSize, Math.max(width, height));
+        const w = Math.max(Math.max(x1 - x0, 1) * pad, floor), h = Math.max(Math.max(y1 - y0, 1) * pad, floor), cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
         const r = svg.getBoundingClientRect(), aspect = r.width / Math.max(1, r.height);
         const bw = Math.max(w, h * aspect), bh = bw / aspect;
         box = [cx - bw / 2, cy - bh / 2, bw, bh]; apply();
@@ -79,7 +82,7 @@ function createViewer(host, {image, width, height, hint = ''}) {
         if (z === 'in') zoom(1 / 1.4); if (z === 'out') zoom(1.4); if (z === 'fit') fit();
     });
     setImage(image, width, height);
-    Object.assign(api, {svg, overlay, fit, focus, ensureVisible, setImage, draw(markup) { overlay.innerHTML = markup; }, get box() { return box; }});
+    Object.assign(api, {svg, overlay, fit, focus, contextSize: m => Math.max(m, .3 * Math.max(width, height)), ensureVisible, setImage, draw(markup) { overlay.innerHTML = markup; }, get box() { return box; }});
     requestAnimationFrame(fit);
     new ResizeObserver(() => { if (host.isConnected) apply(); }).observe(host);
     return api;

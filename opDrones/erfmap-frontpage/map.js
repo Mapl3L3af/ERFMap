@@ -8,23 +8,27 @@ const reduced = matchMedia('(prefers-reduced-motion: reduce)');
 
 const survey = document.querySelector('main');
 let aimX = 0, aimY = 0, lookX = 0, lookY = 0;
+let flightFrame = null;
+function wakeFlight(){ if(flightFrame===null && !document.hidden){previous=performance.now();flightFrame=requestAnimationFrame(fly);} }
 
 function centerLook() {
   aimX = aimY = 0;
+  wakeFlight();
 }
 
 survey.addEventListener('pointermove', event => {
-  if (event.pointerType === 'touch' || entering) return;
+  if (event.pointerType === 'touch' || entering || matchMedia('(max-width: 700px)').matches) return;
   const bounds = survey.getBoundingClientRect();
   aimX = 2 * (event.clientX - bounds.left) / bounds.width - 1;
   aimY = 2 * (event.clientY - bounds.top) / bounds.height - 1;
+  wakeFlight();
 });
 survey.addEventListener('pointerleave', centerLook);
 
 
 [
-  ['New Flyover', 23, 24], ['Open Project', 72, 21],
-  ['Join Project', 28, 72], ['Info', 77, 68]
+  ['Map from Video', 22, 16], ['Open Project', 77, 16],
+  ['Join Project', 22, 81], ['Info', 77, 81]
 ].forEach(([name, left, top], i) => {
   const button = document.createElement('button');
   button.style.left = left + '%';
@@ -34,8 +38,8 @@ survey.addEventListener('pointerleave', centerLook);
     if (entering) return;
     if (name === 'Open Project') document.querySelector('#projectFile').click();
     if (name === 'Join Project') document.querySelector('#joinDialog').showModal();
-    if (name === 'New Flyover') location.assign('/intake/');
-    if (name === 'Info') statusLine.textContent = 'Start a new flyover to turn drone video into a locally scaled map, open a saved JSON file, or join a teammate with their four digit code.';
+    if (name === 'Map from Video') location.assign('/intake/');
+    if (name === 'Info') location.assign('/info.html');
   };
   nav.append(button);
 });
@@ -55,7 +59,7 @@ async function createProject(data) {
 }
 document.querySelector('#projectFile').onchange = async event => {
   const file = event.target.files[0]; event.target.value = '';
-  if (file) await createProject(await file.text());
+  if(file)try { await createProject(/\.glb$/i.test(file.name) ? JSON.stringify(intakeShared.readGlb(new Uint8Array(await file.arrayBuffer()))) : await file.text()); } catch(error){statusLine.textContent=error.message;}
 };
 const joinDialog = document.querySelector('#joinDialog');
 document.querySelector('#cancelJoin').onclick = () => joinDialog.close();
@@ -77,7 +81,7 @@ function drawMap() {
   canvas.height = Math.round(h*ratio);
   const ctx = canvas.getContext('2d');
   ctx.scale(ratio,ratio);
-  ctx.fillStyle = '#161616';
+  ctx.fillStyle = '#101b16';
   ctx.fillRect(0,0,w,h);
   const step = 7, scale = Math.max(285,w/5);
   const paths = new Map();
@@ -106,11 +110,11 @@ function drawMap() {
     }
   }
   for(const [n,path] of paths){
-    ctx.strokeStyle=n%5?'#454545':'#626262';
+    ctx.strokeStyle=n%5?'#37583f':'#698b72';
     ctx.lineWidth=n%5?.65:1;
     ctx.stroke(path);
   }
-  ctx.fillStyle='#777';
+  ctx.fillStyle='#789b80';
   ctx.font='9px monospace';
   for(let a=48;a<w;a+=146) for(let b=52;b<h;b+=146){
     ctx.fillRect(a-3,b,7,.8);ctx.fillRect(a,b-3,.8,7);
@@ -121,32 +125,34 @@ new ResizeObserver(drawMap).observe(world);
 window.addEventListener('keydown',e=>{
   if(e.ctrlKey||e.altKey||e.metaKey||entering||joinDialog.open) return;
   const key=e.key.toLowerCase();
-  if(['w','a','s','d'].includes(key)) held.add(key);
-  if(key==='enter' && !e.repeat && nav.querySelector('button:hover')){
-    e.preventDefault(); nav.querySelector('button:hover').click();
-  }
+  if(['w','a','s','d'].includes(key)){held.add(key);wakeFlight();}
 });
-window.addEventListener('keyup',e=>held.delete(e.key.toLowerCase()));
+window.addEventListener('keyup',e=>{held.delete(e.key.toLowerCase());wakeFlight();});
 window.addEventListener('blur', () => { held.clear(); centerLook(); });
 let previous=performance.now();
 function fly(now){
+  flightFrame=null;
   const dt=Math.min((now-previous)/1000,.05);
   previous=now;
-  const dx=Number(held.has('a'))-Number(held.has('d'));
-  const dy=Number(held.has('w'))-Number(held.has('s'));
+  const mobile=matchMedia('(max-width: 700px)').matches;
+  const dx=mobile?0:Number(held.has('a'))-Number(held.has('d'));
+  const dy=mobile?0:Number(held.has('w'))-Number(held.has('s'));
   const blend=1-Math.exp(-dt*8);
   vx+=(dx-vx)*blend;vy+=(dy-vy)*blend;
   const limitX=world.clientWidth*.115,limitY=world.clientHeight*.12;
   x=Math.max(-limitX,Math.min(limitX,x+vx*dt*135));
   y=Math.max(-limitY,Math.min(limitY,y+vy*dt*135));
-  const tilt=reduced.matches?0:2;
+  if(mobile){x=0;y=0;aimX=aimY=0;}
+  const tilt=reduced.matches||mobile?0:2;
   lookX += (aimX - lookX) * blend;
   lookY += (aimY - lookY) * blend;
   const offsetX = reduced.matches ? 0 : lookX * 10;
   const offsetY = reduced.matches ? 0 : lookY * 7;
   world.style.transform = `translate(${x - offsetX}px, ${y - offsetY}px)
     rotateX(${vy * tilt + offsetY * .06}deg) rotateY(${-vx * tilt - offsetX * .06}deg)`;
-  coords.textContent=(44.4281+y*.00001).toFixed(4)+'° N  /  '+(110.5885+x*.00001).toFixed(4)+'° W';
-  requestAnimationFrame(fly);
+  coords.textContent='ILLUSTRATIVE TERRAIN  /  '+Math.round(x)+' E · '+Math.round(y)+' N';
+  if(!document.hidden && (held.size || Math.abs(vx)+Math.abs(vy)>.001 || Math.abs(aimX-lookX)+Math.abs(aimY-lookY)>.001))flightFrame=requestAnimationFrame(fly);
 }
-requestAnimationFrame(fly);
+window.addEventListener('resize',wakeFlight);
+document.addEventListener('visibilitychange',()=>{held.clear();if(document.hidden){cancelAnimationFrame(flightFrame);flightFrame=null;}else wakeFlight();});
+wakeFlight();

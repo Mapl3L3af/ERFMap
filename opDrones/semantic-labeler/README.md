@@ -1,5 +1,7 @@
 # Semantic Studio
 
+New images assume a capture height of **25 m above local ground**. The selected-image height field can record another known height or be cleared to unknown. Saved projects and training exports preserve height per image, including whether it was assumed or supplied; older images remain unknown. The trainer saves this provenance with its summary. Use labelled 25 m flights and a separate held-out flight at that height to assess the model. Altitude metadata alone does not retrain weights, establish map scale or recover elevation.
+
 Start erfMap with `npm start`, then open http://localhost:3000/semantic-labeler/.
 
 Install training dependencies once in the Python environment used by the server:

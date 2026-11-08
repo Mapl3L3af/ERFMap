@@ -10,8 +10,9 @@ function setTheme(theme) {
     document.documentElement.style.colorScheme = theme;
     document.getElementById('lightMode').setAttribute('aria-pressed', String(theme === 'light'));
     document.getElementById('darkMode').setAttribute('aria-pressed', String(theme === 'dark'));
-    document.getElementById('styleControl').textContent = theme === 'light' ? '3D · Color' : '3D · Monochrome';
+    document.getElementById('styleControl').textContent = '3D walk · WASD to move · drag to look';
     try { localStorage.setItem(themeKey, theme); } catch { /* Keep the mode for this visit. */ }
+    if (typeof draw === 'function') draw();
 }
 
 setTheme(initialTheme);

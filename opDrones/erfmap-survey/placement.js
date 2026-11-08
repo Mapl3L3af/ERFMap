@@ -1,6 +1,6 @@
 // Pointer capture keeps a drag attached to the toolbar figure on touch screens.
 (() => {
-    const button = $('walker');
+    const button = $('walker'), entry = $('enter3d');
     const ghost = document.createElement('div');
     ghost.className = 'walker-marker';
     ghost.setAttribute('aria-hidden', 'true');
@@ -8,10 +8,12 @@
     ghost.hidden = true;
     document.body.append(ghost);
     let armed = false, start = null, moved = false, flight = null;
-    const hint = 'Drop the walker on open ground, or tap a spot. Escape cancels.';
+    const hint = '3D walk: click open ground on the map to start walking there (or drag the orange walker onto it). Escape cancels.';
     function arm(value) {
         armed = value;
         button.setAttribute('aria-pressed', String(value));
+        entry?.setAttribute('aria-pressed', String(value));
+        entry?.querySelector('span')?.replaceChildren(value ? 'Pick a spot…' : 'Walk in 3D');
         document.body.classList.toggle('placing-walker', value);
         ghost.hidden = true;
         if (value) $('status').textContent = hint;
@@ -81,6 +83,10 @@
         if ((e.detail && moved) || flight) return;
         if (armed) cancel(); else arm(true);
     });
+    entry?.addEventListener('click',()=>{
+        if (flight) return;
+        if (armed) cancel(); else arm(true);
+    });
     svg.addEventListener('pointermove',e=>{if(armed)preview(e);});
     svg.addEventListener('pointerleave',()=>{if(!start)ghost.hidden=true;});
     svg.addEventListener('pointerdown',e=>{
@@ -89,7 +95,7 @@
         if (armed && e.button===0) drop(e);
     },true);
     document.addEventListener('click',e=>{
-        if ((armed || flight) && !button.contains(e.target) && e.target.closest('button')) cancel();
+        if ((armed || flight) && !button.contains(e.target) && !entry?.contains(e.target) && e.target.closest('button')) cancel();
     },true);
     window.addEventListener('keydown',e=>{
         if (e.key==='Escape' && (armed || flight)) {

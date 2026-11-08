@@ -82,7 +82,10 @@ const points = p => p.map(q => q.join(',')).join(' ');
 const poly = (p, fill, stroke = '#647660', extra = '') => '<polygon points="' + points(p) + '" fill="' + fill + '" stroke="' + stroke + '" stroke-width="1" ' + extra + '/>';
 const line = (p, c, w = 1, extra = '') => '<polyline points="' + points(p) + '" fill="none" stroke="' + c + '" stroke-width="' + w + '" stroke-linejoin="round" stroke-linecap="round" ' + extra + '/>';
 const circle = (p, r, c, s = 'none', extra = '') => '<circle cx="' + p[0] + '" cy="' + p[1] + '" r="' + r + '" fill="' + c + '" stroke="' + s + '" ' + extra + '/>';
-const label = (p, s, size = 10) => '<text x="' + p[0] + '" y="' + p[1] + '" text-anchor="middle" font-size="' + size + '" fill="#354638" stroke="#f5f5e9" stroke-width="3" paint-order="stroke">' + esc(s) + '</text>';
+const chrome = () => document.body.classList.contains('theme-light')
+    ? { ground:'#f6f8f8', edge:'#798c96', hatch:'#e1e6e9', hatchLine:'#93a2ad', labelInk:'#354638', labelHalo:'#f5f5e9' }
+    : { ground:'#1f2622', edge:'#6f8580', hatch:'#2b3330', hatchLine:'#56645f', labelInk:'#eef3e6', labelHalo:'#141816' };
+const label = (p, s, size = 10) => '<text x="' + p[0] + '" y="' + p[1] + '" text-anchor="middle" font-size="' + size + '" fill="'+chrome().labelInk+'" stroke="'+chrome().labelHalo+'" stroke-width="3" paint-order="stroke">' + esc(s) + '</text>';
 function feature(f, i) {
     const p = f.p.map(q => project(q)), c = featureColor(f), selected = i === sel && !view3;
     let s = '';
@@ -97,7 +100,11 @@ function feature(f, i) {
     else if (!isPoint(f)) {
         const invisible = f.itemType === 'fence' && f.tagProperties?.visibility === 'Invisible';
         const width = ['path', 'road'].includes(f.itemType) ? Math.max(3, Math.min(60, scale * Number(f.tagProperties?.width || (f.itemType === 'road' ? 6 : 1.8)))) : Math.max(4, scale * 1.6);
-        s += line(p, '#938d77', width + 2) + line(p, c, width, invisible ? 'stroke-dasharray="3 4" opacity=".38"' : '');
+        if (f.kind === 'path' && f.tagProperties?.widthProfile) {
+            const widths = featureSegmentWidths(f).map(v => Math.max(3, Math.min(60, scale*v)));
+            for (let j=0;j<widths.length;j++) s += line(p.slice(j,j+2), '#938d77', widths[j]+2);
+            for (let j=0;j<widths.length;j++) s += line(p.slice(j,j+2), c, widths[j]);
+        } else s += line(p, '#938d77', width + 2) + line(p, c, width, invisible ? 'stroke-dasharray="3 4" opacity=".38"' : '');
         if (selected && ['path', 'road'].includes(f.itemType))
             s += label(p[Math.floor(p.length / 2)], Number(f.tagProperties?.width || (f.itemType === 'road' ? 6 : 1.8)).toFixed(1) + ' m · ' + (f.tagProperties?.surface || (f.itemType === 'road' ? 'Road' : 'Path')), 9);
     }
@@ -198,17 +205,17 @@ function draw() {
     const W = svg.clientWidth, H = svg.clientHeight;
     if (!W)
         return;
-    const compact=W<750, sidebar=folded||compact?0:315;
-    const detailDock=compact && !folded && (tab==='Simulate' || (tab==='Analyse' && analysisTool==='Real Paths (Desire Paths)'));
-    const topInset=compact?154:164, bottomInset=detailDock?Math.min(H*.41,310)+24:compact?82:88;
+    const compact=W<750, sidebar=folded||compact?0:352;
+    const sheet=Math.min(innerHeight*.52,440)+12;
+    const topInset=compact?120:84, bottomInset=compact&&!folded?sheet:compact?84:112;
     cx=(W+sidebar)/2+offset[0];cy=(H+topInset-bottomInset)/2+offset[1];
     scale=zoom*Math.min(Math.max(80,W-sidebar-66)/site.w,Math.max(80,H-topInset-bottomInset)/site.h);
-    let s='<defs><pattern id="hatch" patternUnits="userSpaceOnUse" width="6" height="6"><rect width="6" height="6" fill="#e1e6e9"/><path d="M-1 1L1 -1M0 6L6 0M5 7L7 5" stroke="#93a2ad" stroke-width=".8"/></pattern><radialGradient id="orb"><stop stop-color="#ffd88a"/><stop offset="1" stop-color="#e07c39"/></radialGradient></defs>';
-    s += poly(rect(0,0,site.w,site.h).map(q=>project(q)),'#f6f8f8','#798c96','stroke-dasharray="5 3"');
+    let s='<defs><pattern id="hatch" patternUnits="userSpaceOnUse" width="6" height="6"><rect width="6" height="6" fill="'+chrome().hatch+'"/><path d="M-1 1L1 -1M0 6L6 0M5 7L7 5" stroke="'+chrome().hatchLine+'" stroke-width=".8"/></pattern><radialGradient id="orb"><stop stop-color="#ffd88a"/><stop offset="1" stop-color="#e07c39"/></radialGradient></defs>';
+    s += poly(rect(0,0,site.w,site.h).map(q=>project(q)),chrome().ground,chrome().edge,'stroke-dasharray="5 3"');
     const top=project([site.w/2,0]);
     s+=label([top[0],top[1]-10],n(site.w)+' m  ·  E–W');
     s+=label(project([site.w/2,site.h+15/scale]),n(site.h)+' m  ·  N–S');
-    const rank = f => isPoint(f) ? 3 : f.kind === 'building' ? 2 : isArea(f) ? 0 : 1;
+    const rank = f => f.kind === 'grass' ? -1 : isPoint(f) ? 3 : f.kind === 'building' ? 2 : isArea(f) ? 0 : 1;
     site.features.map((f, i) => ({ f, i })).sort((a, b) => rank(a.f) - rank(b.f) || (view3 ? project(a.f.p[0])[1] - project(b.f.p[0])[1] : 0)).forEach(({ f, i }) => s += feature(f, i));
     if (tab === 'Analyse') s += analysisHeatmapMarkup(site, analysisTool, scale, project);
     if (tab === 'Analyse' && analysisTool === 'Trash Can') s += analysisTrashOverlay(site, trashSpacing, scale, project, line, circle);
@@ -290,6 +297,8 @@ function render() {
     $('toolbarUndo').disabled=!history.length;
     $('contours').checked=contours;
     $('contours').disabled=!site.samples.length && !site.contours?.length;
+    $('contourInterval').disabled=!site.samples.length;
+    if(document.activeElement!==$('contourInterval'))$('contourInterval').value=site.contourInterval??'';
     $('fold').setAttribute('aria-expanded',String(!folded));document.body.classList.toggle('folded',folded);
     $('pan').setAttribute('aria-pressed',String(panMode));svg.style.cursor=panMode?'grab':'';
     $('distanceTool').setAttribute('aria-pressed',String(distanceMode));
@@ -540,8 +549,10 @@ document.addEventListener('change', async (e) => {
     let el = e.target;
     if (el.id === 'file') {
         try {
-            let data = JSON.parse(await el.files[0].text());
-            let next = data.format === 'fieldform-site-v1' ? restore(data.site) : importSurvey(data);
+            if(!el.files[0])return;
+            const file=el.files[0];
+            let data = /\.glb$/i.test(file.name) ? intakeShared.readGlb(new Uint8Array(await file.arrayBuffer())) : JSON.parse(await file.text());
+            let next = data.type === 'FeatureCollection' ? importSurvey(data) : restore(data.site || data);
             site = next;contours=site.showContours!==false;profilePoints=[];
             sel = -1;
             history = [];
@@ -557,7 +568,7 @@ document.addEventListener('change', async (e) => {
         el.value = '';
         return;
     }
-    if (el.closest('#propertiesPanelFields')) return;
+    if (el.closest('#propertiesPanelFields') || ['contourInterval','groundFile'].includes(el.id)) return;
     if(el.id==='contours'){contours=el.checked;site.showContours=contours;persist();multiplayer.sendSite();}
     if(el.id==='analysisLayer'){analysisTool=el.value;profilePoints=[];}
     if(el.id==='populationCount'){

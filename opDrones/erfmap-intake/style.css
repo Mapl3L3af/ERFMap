@@ -194,3 +194,25 @@ header .brand{color:var(--accent)}
 .processing-state{min-height:200px}
 .processing-state h3{font-size:16px}
 .processing-orbit{width:24px;height:24px}
+/* Feature list beside the review map: pick any feature and see it on the map at once. */
+.review-list-title{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.review-list{display:flex;flex-direction:column;gap:6px;max-height:min(42dvh,420px);overflow:auto;padding-right:2px}
+.review-controls .review-list button{display:flex;align-items:center;gap:10px;width:100%;text-align:left;padding:8px 10px;border:1px solid var(--line);border-radius:6px;background:transparent;color:inherit;cursor:pointer}
+.review-list button:hover{border-color:var(--dim)}
+.review-list button[aria-current=true]{border-color:var(--accent);background:color-mix(in srgb,var(--accent) 12%,transparent)}
+.review-list i{flex:none;width:12px;height:12px;border-radius:3px}
+.review-list span{display:flex;flex-direction:column;min-width:0}
+.review-list b{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.review-list small{color:var(--dim);font-size:11px}
+/* Phones: keep the map pinned at the top while the list scrolls under it. */
+@media(max-width:749px){
+  .review-map-panel{position:sticky;top:0;z-index:5;height:46dvh;min-height:280px}
+  .review-controls{max-height:none;overflow:visible}
+  .review-list{max-height:none}
+}
+/* The review map fills its panel instead of stopping at a fixed height. */
+.review-map-panel #rmap{display:flex;flex-direction:column}
+.review-map-panel #rmap>.row{padding:8px 8px 0;margin:0}
+.review-map-panel #rmap>.mapv{flex:1;height:auto;min-height:240px;margin:8px!important;border-radius:6px}
+#captureHeight{width:7rem;max-width:100%;padding:8px;margin:6px 0;border:1px solid var(--line,#d5ded8);border-radius:7px;font:inherit}
+.reference-viewer{height:420px;margin:16px 0}.reference-points input{width:9rem;max-width:100%}.map-reference input[type=text]{max-width:100%;width:26rem}.map-reference{margin-top:18px}

@@ -1,0 +1,1 @@
+Natural source photo, higher-resolution tiled inference and updated path geometry. Yellow: detected boundaries. Magenta: centre lines. No held-out boundary annotations are available; this is a visual review, not an accuracy benchmark. Existing intake results are unchanged.

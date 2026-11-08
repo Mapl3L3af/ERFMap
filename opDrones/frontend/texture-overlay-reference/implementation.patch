@@ -1,0 +1,480 @@
+--- a/index.html
++++ b/index.html
+@@ -1,11 +1,11 @@
+ <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Fieldform · Site workspace</title><link rel="stylesheet" href="style.css?v=pedestrians4"></head><body>
+ <header><strong class="brand" title="Fieldform survey planner"><i>▱</i><span>Fieldform</span></strong><section class="title"><small>FIELD OPERATIONS &nbsp; / &nbsp; SITE PLANNER</small><h1 id="name"></h1><p id="subtitle"></p></section><div class="spacer"></div><button id="import">↥ &nbsp; Import survey</button><input hidden id="file" type="file" accept=".geojson,.json"><button id="save">Save scenario ↓</button></header><nav id="documentMenus" aria-label="Survey menus">
+-<details><summary>File</summary><div class="menu-popover"><button data-command="import">Open survey…</button><button data-command="save">Download scenario</button></div></details>
++<details><summary>File</summary><div class="menu-popover"><button data-command="import">Open survey…</button><button id="attachTexture" title="Use a north-up image cropped to the full survey extent">Attach aligned texture…</button><input hidden id="textureFile" type="file" accept="image/jpeg,image/png,image/webp"><button data-command="save">Download scenario</button></div></details>
+ <details><summary>Edit</summary><div class="menu-popover"><button data-command="undo">Undo geometry edit</button><button data-command="select">Select feature</button><button data-command="move">Move vertex</button></div></details>
+-<details><summary>Settings</summary><div class="menu-popover menu-settings"><label><input type="checkbox" id="measure" checked> Show dimensions</label><label><input type="checkbox" id="contours" checked> Show contours</label></div></details>
++<details><summary>Settings</summary><div class="menu-popover menu-settings"><label><input type="checkbox" id="measure" checked> Show dimensions</label><label><input type="checkbox" id="contours" checked> Show contours</label><label><input type="checkbox" id="surveyTextures" disabled> Survey textures</label></div></details>
+ <details><summary>View</summary><div class="menu-popover"><button data-command="fit">Fit survey</button><button data-command="plus">Zoom in</button><button data-command="minus">Zoom out</button></div></details>
+ </nav>
+ <dialog id="propertiesDialog" aria-labelledby="propertiesTitle"><div class="property-dialog-head"><div><small>FEATURE DATA</small><h2 id="propertiesTitle">Properties &amp; tagging</h2></div><button type="button" id="closeProperties" aria-label="Close properties">×</button></div><p class="property-intro">Defaults are prefilled for the selected item type; edit as needed.</p><p id="propertiesMessage" role="status"></p><div id="propertiesFields"></div><div class="property-actions"><button type="button" id="cancelProperties">Cancel</button><button type="button" id="applyProperties" class="active">Save properties</button></div></dialog>
+ <main>
+ <section class="workspace"><article><div class="bar" role="toolbar" aria-label="Survey tools"><button id="toolbarUndo" data-command="undo" title="Undo geometry edit" aria-label="Undo geometry edit">↶</button><button id="fit" title="Fit survey">Fit</button><button id="pan" aria-pressed="false">Pan</button><button id="toolbarSelect" aria-pressed="false">Select</button><button id="distanceTool" aria-pressed="false" title="Measure distance between two map points">Distance</button><span class="toolbar-divider"></span><div class="tabs" id="tabs" aria-label="Tool panels"></div><label id="styleControl" hidden>3D style · Realistic</label><div class="seg"><button id="flat" hidden>← Back to plan</button></div></div><div id="surface"><svg id="map" tabindex="0" aria-label="Interactive site map"></svg><canvas id="walk" tabindex="0" hidden aria-label="First-person walkthrough. WASD to walk, Shift to run, Space to jump. Drag to look around."></canvas><div id="pad" hidden><button data-walk="arrowleft" aria-label="Turn left">↶</button><button data-walk="w" aria-label="Walk forward">▲</button><button data-walk="s" aria-label="Walk backward">▼</button><button data-walk="arrowright" aria-label="Turn right">↷</button><button data-walk="shift" title="Hold to run (Shift)">Run</button><button data-walk="jump" title="Jump (Space)">Jump</button></div><label class="badge" id="badge"></label><button id="walker" aria-label="Place walker in 3D" aria-pressed="false" title="Drag the person onto the plan, or click and choose a spot"><svg viewBox="0 0 24 36" aria-hidden="true"><circle cx="12" cy="4.3" r="3.5"/><path d="M8 9h8q3 0 3.7 3l2 9q.4 2-1.4 2.4-1.7.3-2.1-1.5L16 14v18.8q0 2.2-2 2.2t-2-2.2V23h-.7v9.8q0 2.2-2 2.2t-2-2.2V14l-2 7.9q-.5 1.8-2.1 1.5-1.8-.4-1.4-2.4l2-9Q4.5 9 8 9Z"/></svg></button><div class="nav"><button id="minus" title="Zoom out">−</button><button id="plus" title="Zoom in">+</button></div></div><footer id="status" role="status"></footer></article>
+-<aside><button id="fold" aria-expanded="true" aria-controls="toolBody">Hide tools</button><div id="toolBody"><small>CONTROL PANEL</small><h2 id="panelTitle">Add</h2><section id="panel"></section></div></aside></section><div class="legend" id="legend"></div></main><script src="model.js?v=warning1"></script><script src="mobility.js?v=warning1"></script><script src="elevation.js"></script><script src="analysis.js?v=pedestrians4"></script><script src="environment.js?v=pedestrians4"></script><script src="walk.js?v=warning1"></script><script src="snapping.js"></script><script src="app.js?v=warning1"></script><script src="placement.js"></script><script src="menus.js"></script><script src="properties.js"></script></body></html>
++<aside><button id="fold" aria-expanded="true" aria-controls="toolBody">Hide tools</button><div id="toolBody"><small>CONTROL PANEL</small><h2 id="panelTitle">Add</h2><section id="panel"></section></div></aside></section><div class="legend" id="legend"></div></main><script src="model.js?v=warning1"></script><script src="mobility.js?v=warning1"></script><script src="elevation.js"></script><script src="analysis.js?v=pedestrians4"></script><script src="environment.js?v=pedestrians4"></script><script src="survey-texture.js"></script><script src="walk.js?v=warning1"></script><script src="snapping.js"></script><script src="app.js?v=warning1"></script><script src="placement.js"></script><script src="menus.js"></script><script src="properties.js"></script></body></html>
+--- a/app.js
++++ b/app.js
+@@ -86,7 +86,8 @@
+     const p = f.p.map(q => project(q)), c = featureColor(f), selected = i === sel && !view3;
+     let s = '';
+     if (isArea(f)) {
+-        const fill = f.kind === 'building' && !f.itemType ? 'url(#hatch)' : c;
++        const photo = surveyTexture.active(site) && surveyTexture.eligible(f);
++        const fill = photo ? 'url(#survey-photo)' : f.kind === 'building' && !f.itemType ? 'url(#hatch)' : c;
+         s += poly(p,fill,selected?'#155d76':'#647780');
+         if (!view3 && f.kind === 'building' && ($('measure').checked || selected)) {
+             let m = p.reduce((v, q) => [v[0] + q[0] / p.length, v[1] + q[1] / p.length], [0, 0]);
+@@ -96,7 +97,7 @@
+     else if (!isPoint(f)) {
+         const invisible = f.itemType === 'fence' && f.tagProperties?.visibility === 'Invisible';
+         const width = ['path', 'road'].includes(f.itemType) ? Math.max(3, Math.min(60, scale * Number(f.tagProperties?.width || (f.itemType === 'road' ? 6 : 1.8)))) : Math.max(4, scale * 1.6);
+-        s += line(p, '#938d77', width + 2) + line(p, c, width, invisible ? 'stroke-dasharray="3 4" opacity=".38"' : '');
++        s += line(p, '#938d77', width + 2) + line(p, surveyTexture.active(site) && surveyTexture.eligible(f) ? 'url(#survey-photo)' : c, width, invisible ? 'stroke-dasharray="3 4" opacity=".38"' : '');
+         if (selected && ['path', 'road'].includes(f.itemType))
+             s += label(p[Math.floor(p.length / 2)], Number(f.tagProperties?.width || (f.itemType === 'road' ? 6 : 1.8)).toFixed(1) + ' m · ' + (f.tagProperties?.surface || (f.itemType === 'road' ? 'Road' : 'Path')), 9);
+     }
+@@ -202,6 +203,7 @@
+     cx=(W+sidebar)/2+offset[0];cy=(H+topInset-bottomInset)/2+offset[1];
+     scale=zoom*Math.min(Math.max(80,W-sidebar-66)/site.w,Math.max(80,H-topInset-bottomInset)/site.h);
+     let s='<defs><pattern id="hatch" patternUnits="userSpaceOnUse" width="6" height="6"><rect width="6" height="6" fill="#e1e6e9"/><path d="M-1 1L1 -1M0 6L6 0M5 7L7 5" stroke="#93a2ad" stroke-width=".8"/></pattern><radialGradient id="orb"><stop stop-color="#ffd88a"/><stop offset="1" stop-color="#e07c39"/></radialGradient></defs>';
++    s += surveyTexture.definition(site, project, scale);
+     s += poly(rect(0,0,site.w,site.h).map(q=>project(q)),'#f6f8f8','#798c96','stroke-dasharray="5 3"');
+     const top=project([site.w/2,0]);
+     s+=label([top[0],top[1]-10],n(site.w)+' m  ·  E–W');
+@@ -277,6 +279,8 @@
+ function displayedAnalysis(){return null;}
+ const hints = { 'Select': 'Select and drag vertices or standalone items. Backspace removes the selected vertex, or the feature if no vertex is selected.', 'Draw feature': 'Click to place points. Paths snap to nearby junctions and segments. Finish the shape below.', 'Move vertex': 'Select a feature, then drag a white handle.' };
+ function render() {
++    surveyTexture.sync(site);
++    svg.classList.toggle('textured-map', Boolean(surveyTexture.active(site)));
+     $('name').textContent = site.name;
+     $('subtitle').textContent = (site.demo ? 'Demonstration survey' : 'Imported survey') + '   •   ' + site.features.length + ' mapped features   •   Local metres';
+     document.body.classList.toggle('walking',view3);
+@@ -512,6 +516,9 @@
+         case 'properties':
+             openProperties();
+             return;
++        case 'attachTexture':
++            $('textureFile').click();
++            return;
+         case 'import':
+             $('file').click();
+             return;
+@@ -532,6 +539,35 @@
+ }
+ document.addEventListener('change', async (e) => {
+     let el = e.target;
++    if (el.id === 'surveyTextures') {
++        site.showTextures = el.checked;
++        walk.invalidate();
++        persist();
++    }
++    if (el.id === 'textureFile') {
++        const target = site, file = el.files[0];
++        el.value = '';
++        if (!file) return;
++        try {
++            const reader = new FileReader();
++            const data = await new Promise((resolve, reject) => {
++                reader.onload = () => resolve(reader.result);
++                reader.onerror = reject;
++                reader.readAsDataURL(file);
++            });
++            if (!/^data:image\/(jpeg|png|webp);base64,/i.test(data)) throw Error();
++            const preview = new Image();
++            preview.src = data;
++            await preview.decode();
++            if (target !== site) return;
++            site.textureImage = data;
++            site.showTextures = true;
++            msg = 'Texture aligned to the full survey extent.';
++            persist();
++        } catch { msg = 'Choose a readable JPEG, PNG, or WebP image.'; }
++        render();
++        return;
++    }
+     if (el.id === 'file') {
+         try {
+             let data = JSON.parse(await el.files[0].text());
+--- a/walk.js
++++ b/walk.js
+@@ -62,17 +62,21 @@
+         vertices=[];scene=site;const tex=document.createElement('canvas');tex.width=tex.height=1024;
+         const ctx=tex.getContext('2d');ctx.scale(1024/site.w,1024/site.h);
+         ctx.fillStyle=style==='realistic'?'#92957b':'#b3c97c';ctx.fillRect(0,0,site.w,site.h);
+-        const groundFeatures=site.features.filter(f=>(kinds[f.kind][2]==='area'&&f.kind!=='building')||['path','crossing'].includes(f.kind));
++        const photo = surveyTexture.active(site);
++        const paint = photo && ctx.createPattern(photo, 'no-repeat');
++        if (paint) paint.setTransform(new DOMMatrix().scale(site.w / photo.width, site.h / photo.height));
++        const groundFeatures=site.features.filter(f=>(kinds[f.kind][2]==='area'&&f.kind!=='building')||['path','crossing'].includes(f.kind)||(paint && surveyTexture.eligible(f) && ['building','roadLine'].includes(f.kind)));
+         for(const f of groundFeatures.sort((a,b)=>Number(kinds[a.kind][2]!=='area')-Number(kinds[b.kind][2]!=='area'))){
++            const material = paint && surveyTexture.eligible(f) ? paint : featureColor(f);
+             ctx.beginPath();f.p.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));
+-            if(kinds[f.kind][2]==='area'){ctx.closePath();ctx.fillStyle=featureColor(f);ctx.fill();}
+-            else{ctx.strokeStyle=featureColor(f);ctx.lineWidth=Math.max(1.1,Number(f.tagProperties?.width||1.55));ctx.lineJoin='round';ctx.stroke();}
++            if(kinds[f.kind][2]==='area'){ctx.closePath();ctx.fillStyle=material;ctx.fill();}
++            else{ctx.strokeStyle=material;ctx.lineWidth=Math.max(1.1,Number(f.tagProperties?.width||(f.kind==='roadLine'?6:1.55)));ctx.lineJoin='round';ctx.stroke();}
+         }
+         // Sparse ink marks and soft contact shadows on the illustrated ground.
+         const noise=i=>{const v=Math.sin(i*78.233+19.7)*43758.5453;return v-Math.floor(v);};
+         if(!bare){
+         ctx.save();
+-        for(const f of groundFeatures.filter(f=>f.kind==='grass'||f.kind==='water')){
++        for(const f of groundFeatures.filter(f=>(f.kind==='grass'||f.kind==='water') && !(paint && surveyTexture.eligible(f)))){
+             ctx.save();ctx.beginPath();f.p.forEach((q,i)=>i?ctx.lineTo(...q):ctx.moveTo(...q));ctx.closePath();ctx.clip();
+             const water=f.kind==='water';ctx.strokeStyle=water?'#d0efe950':'#42523535';ctx.lineWidth=water?.13:.09;
+             ctx.beginPath();for(let i=0;i<(playful?1200:4800);i++){
+@@ -110,7 +114,8 @@
+             if(f.kind==='building'){
+                 const shed=f.itemType==='employeeShed';
+                 const base=f.p.map(q=>[...q,surface(q)-.15]), roof=Math.max(...base.map(q=>q[2]))+(+f.height||(shed?2.6:5));
+-                const roofColor=featureColor(f), roofShape=shed?'Pointed':f.tagProperties?.roofShape||'Flat';
++                const roofPhoto=Boolean(paint && surveyTexture.eligible(f));
++                const roofColor=roofPhoto?'#ffffff':featureColor(f), roofShape=shed?'Pointed':f.tagProperties?.roofShape||'Flat';
+                 const walls=edges(base,true);
+                 const doorWall=shed?walls.reduce((best,wall)=>dist(...wall)>dist(...best)?wall:best):null;
+                 for(const wall of walls){
+@@ -138,18 +143,18 @@
+                         face([[x-ux,y-uy,roof-2.7],[x+ux,y+uy,roof-2.7],[x+ux,y+uy,roof-1.4],[x-ux,y-uy,roof-1.4]],playful?'#82b4bc':'#596c75');}
+                     }
+                 }
+-                if(roofShape==='Flat')for(const patch of surfaceCells(f.p,site.w,site.h))face(patch.map(q=>[...q,roof]),roofColor);
++                if(roofShape==='Flat')for(const patch of surfaceCells(f.p,site.w,site.h))face(patch.map(q=>[...q,roof]),roofColor,1,Number(roofPhoto));
+                 else{
+                     const center=f.p.reduce((sum,q)=>[sum[0]+q[0]/f.p.length,sum[1]+q[1]/f.p.length], [0,0]);
+                     const peak=roof+(shed ? 0.65 : roofShape==='Pointed'?2.5:1.1);
+-                    for(const [a,b] of edges(f.p,true))face([[...a,roof],[...b,roof],[center[0],center[1],peak]],roofColor,.9+.1*Math.abs(b[0]-a[0])/Math.max(.01,dist(a,b)));
++                    for(const [a,b] of edges(f.p,true))face([[...a,roof],[...b,roof],[center[0],center[1],peak]],roofColor,.9+.1*Math.abs(b[0]-a[0])/Math.max(.01,dist(a,b)),Number(roofPhoto));
+                 }
+             }else if(f.kind==='roadLine'){
+                 const width=Math.max(.2,Number(f.tagProperties?.width||6)),half=width/2,color=featureColor(f);
+                 for(const [a,b] of edges(f.p)){
+                     const length=dist(a,b);if(length<.001)continue;
+                     const nx=-(b[1]-a[1])/length*half,ny=(b[0]-a[0])/length*half;
+-                    face([[a[0]+nx,a[1]+ny],[b[0]+nx,b[1]+ny],[b[0]-nx,b[1]-ny],[a[0]-nx,a[1]-ny]].map(q=>[...q,surface(q)+.035]),color);
++                    face([[a[0]+nx,a[1]+ny],[b[0]+nx,b[1]+ny],[b[0]-nx,b[1]-ny],[a[0]-nx,a[1]-ny]].map(q=>[...q,surface(q)+.035]),paint && surveyTexture.eligible(f)?'#ffffff':color,1,Number(Boolean(paint && surveyTexture.eligible(f))));
+                 }
+             }else if(f.kind==='tree'){
+                 const growth=Math.max(2,Math.min(40,Number(f.tagProperties?.maxGrowth||16))),size=growth/18,treeColor=featureColor(f);
+--- a/erfmap-survey/index.html
++++ b/erfmap-survey/index.html
+@@ -1,11 +1,11 @@
+ <!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>erfMap · Survey workspace</title><link rel="icon" href="favicon.svg" type="image/svg+xml"><link rel="stylesheet" href="style.css"></head><body>
+ <header><strong class="brand" title="Environmental Revision Flyover Map">erfMap</strong><section class="title"><small>SURVEY WORKSPACE</small><h1 id="name"></h1><p id="subtitle"></p></section><div class="spacer"></div><button id="import">↥ &nbsp; Import survey</button><input hidden id="file" type="file" accept=".geojson,.json"><button id="save">Save scenario ↓</button></header><nav id="documentMenus" aria-label="Survey menus">
+-<details><summary>File</summary><div class="menu-popover"><button data-command="import">Open survey…</button><button data-command="save">Download scenario</button></div></details>
++<details><summary>File</summary><div class="menu-popover"><button data-command="import">Open survey…</button><button id="attachTexture" title="Use a north-up image cropped to the full survey extent">Attach aligned texture…</button><input hidden id="textureFile" type="file" accept="image/jpeg,image/png,image/webp"><button data-command="save">Download scenario</button></div></details>
+ <details><summary>Edit</summary><div class="menu-popover"><button data-command="undo">Undo geometry edit</button><button data-command="select">Select feature</button><button data-command="move">Move vertex</button></div></details>
+-<details><summary>Settings</summary><div class="menu-popover menu-settings"><label><input type="checkbox" id="measure" checked> Show dimensions</label><label><input type="checkbox" id="contours" checked> Show contours</label></div></details>
++<details><summary>Settings</summary><div class="menu-popover menu-settings"><label><input type="checkbox" id="measure" checked> Show dimensions</label><label><input type="checkbox" id="contours" checked> Show contours</label><label><input type="checkbox" id="surveyTextures" disabled> Survey textures</label></div></details>
+ <details><summary>View</summary><div class="menu-popover"><button data-command="fit">Fit survey</button><button data-command="plus">Zoom in</button><button data-command="minus">Zoom out</button></div></details>
+ </nav>
+ <dialog id="propertiesDialog" aria-labelledby="propertiesTitle"><div class="property-dialog-head"><div><small>FEATURE DATA</small><h2 id="propertiesTitle">Properties &amp; tagging</h2></div><button type="button" id="closeProperties" aria-label="Close properties">×</button></div><p class="property-intro">Defaults are prefilled for the selected item type; edit as needed.</p><p id="propertiesMessage" role="status"></p><div id="propertiesFields"></div><div class="property-actions"><button type="button" id="cancelProperties">Cancel</button><button type="button" id="applyProperties" class="active">Save properties</button></div></dialog>
+ <main>
+ <section class="workspace"><article><div class="bar" role="toolbar" aria-label="Survey tools"><button id="toolbarUndo" data-command="undo" title="Undo geometry edit" aria-label="Undo geometry edit">↶</button><button id="fit" title="Fit survey">Fit</button><button id="pan" aria-pressed="false">Pan</button><button id="toolbarSelect" aria-pressed="false">Select</button><button id="distanceTool" aria-pressed="false" title="Measure distance between two map points">Distance</button><span class="toolbar-divider"></span><div class="tabs" id="tabs" aria-label="Tool panels"></div><label id="styleControl" hidden>3D · Monochrome</label><div class="seg"><button id="flat" hidden>← Back to plan</button></div></div><div id="surface"><svg id="map" tabindex="0" aria-label="Interactive site map"></svg><canvas id="walk" tabindex="0" hidden aria-label="First-person walkthrough. WASD to walk, Shift to run, Space to jump. Drag to look around."></canvas><div id="pad" hidden><button data-walk="arrowleft" aria-label="Turn left">↶</button><button data-walk="w" aria-label="Walk forward">▲</button><button data-walk="s" aria-label="Walk backward">▼</button><button data-walk="arrowright" aria-label="Turn right">↷</button><button data-walk="shift" title="Hold to run (Shift)">Run</button><button data-walk="jump" title="Jump (Space)">Jump</button></div><label class="badge" id="badge"></label><button id="walker" aria-label="Place walker in 3D" aria-pressed="false" title="Drag the person onto the plan, or click and choose a spot"><svg viewBox="0 0 24 36" aria-hidden="true"><circle cx="12" cy="4.3" r="3.5"/><path d="M8 9h8q3 0 3.7 3l2 9q.4 2-1.4 2.4-1.7.3-2.1-1.5L16 14v18.8q0 2.2-2 2.2t-2-2.2V23h-.7v9.8q0 2.2-2 2.2t-2-2.2V14l-2 7.9q-.5 1.8-2.1 1.5-1.8-.4-1.4-2.4l2-9Q4.5 9 8 9Z"/></svg></button><div class="nav"><button id="minus" title="Zoom out">−</button><button id="plus" title="Zoom in">+</button></div></div><footer id="status" role="status"></footer></article>
+-<aside><button id="fold" aria-expanded="true" aria-controls="toolBody">Hide tools</button><div id="toolBody"><small>CONTROL PANEL</small><h2 id="panelTitle">Add</h2><section id="panel"></section></div></aside></section><div class="legend" id="legend"></div></main><script src="model.js"></script><script src="mobility.js"></script><script src="elevation.js"></script><script src="analysis.js"></script><script src="environment.js"></script><script src="walk.js"></script><script src="snapping.js"></script><script src="app.js"></script><script src="placement.js"></script><script src="menus.js"></script><script src="properties.js"></script></body></html>
++<aside><button id="fold" aria-expanded="true" aria-controls="toolBody">Hide tools</button><div id="toolBody"><small>CONTROL PANEL</small><h2 id="panelTitle">Add</h2><section id="panel"></section></div></aside></section><div class="legend" id="legend"></div></main><script src="model.js"></script><script src="mobility.js"></script><script src="elevation.js"></script><script src="analysis.js"></script><script src="environment.js"></script><script src="survey-texture.js"></script><script src="walk.js"></script><script src="snapping.js"></script><script src="app.js"></script><script src="placement.js"></script><script src="menus.js"></script><script src="properties.js"></script></body></html>
+--- a/erfmap-survey/app.js
++++ b/erfmap-survey/app.js
+@@ -81,7 +81,8 @@
+     const p = f.p.map(q => project(q)), c = featureColor(f), selected = i === sel && !view3;
+     let s = '';
+     if (isArea(f)) {
+-        const fill = f.kind === 'building' && !f.itemType ? 'url(#hatch)' : c;
++        const photo = surveyTexture.active(site) && surveyTexture.eligible(f);
++        const fill = photo ? 'url(#survey-photo)' : f.kind === 'building' && !f.itemType ? 'url(#hatch)' : c;
+         s += poly(p,fill,selected?'#155d76':'#647780');
+         if (!view3 && f.kind === 'building' && ($('measure').checked || selected)) {
+             let m = p.reduce((v, q) => [v[0] + q[0] / p.length, v[1] + q[1] / p.length], [0, 0]);
+@@ -91,7 +92,7 @@
+     else if (!isPoint(f)) {
+         const invisible = f.itemType === 'fence' && f.tagProperties?.visibility === 'Invisible';
+         const width = ['path', 'road'].includes(f.itemType) ? Math.max(3, Math.min(60, scale * Number(f.tagProperties?.width || (f.itemType === 'road' ? 6 : 1.8)))) : Math.max(4, scale * 1.6);
+-        s += line(p, '#938d77', width + 2) + line(p, c, width, invisible ? 'stroke-dasharray="3 4" opacity=".38"' : '');
++        s += line(p, '#938d77', width + 2) + line(p, surveyTexture.active(site) && surveyTexture.eligible(f) ? 'url(#survey-photo)' : c, width, invisible ? 'stroke-dasharray="3 4" opacity=".38"' : '');
+         if (selected && ['path', 'road'].includes(f.itemType))
+             s += label(p[Math.floor(p.length / 2)], Number(f.tagProperties?.width || (f.itemType === 'road' ? 6 : 1.8)).toFixed(1) + ' m · ' + (f.tagProperties?.surface || (f.itemType === 'road' ? 'Road' : 'Path')), 9);
+     }
+@@ -154,6 +155,7 @@
+     cx=(W+sidebar)/2+offset[0];cy=(H+topInset-bottomInset)/2+offset[1];
+     scale=zoom*Math.min(Math.max(80,W-sidebar-66)/site.w,Math.max(80,H-topInset-bottomInset)/site.h);
+     let s='<defs><pattern id="hatch" patternUnits="userSpaceOnUse" width="6" height="6"><rect width="6" height="6" fill="#e1e6e9"/><path d="M-1 1L1 -1M0 6L6 0M5 7L7 5" stroke="#93a2ad" stroke-width=".8"/></pattern><radialGradient id="orb"><stop stop-color="#ffd88a"/><stop offset="1" stop-color="#e07c39"/></radialGradient></defs>';
++    s += surveyTexture.definition(site, project, scale);
+     s += poly(rect(0,0,site.w,site.h).map(q=>project(q)),'#f6f8f8','#798c96','stroke-dasharray="5 3"');
+     const top=project([site.w/2,0]);
+     s+=label([top[0],top[1]-10],n(site.w)+' m  ·  E–W');
+@@ -228,6 +230,8 @@
+ function displayedAnalysis(){return null;}
+ const hints = { 'Select': 'Select and drag vertices or standalone items. Backspace removes the selected vertex, or the feature if no vertex is selected.', 'Draw feature': 'Click to place points. Paths snap to nearby junctions and segments. Finish the shape below.', 'Move vertex': 'Select a feature, then drag a white handle.' };
+ function render() {
++    surveyTexture.sync(site);
++    svg.classList.toggle('textured-map', Boolean(surveyTexture.active(site)));
+     $('name').textContent = site.name;
+     $('subtitle').textContent = (site.demo ? 'Demonstration survey' : 'Imported survey') + '   •   ' + site.features.length + ' mapped features   •   Local metres';
+     document.body.classList.toggle('walking',view3);
+@@ -451,6 +455,9 @@
+         case 'properties':
+             openProperties();
+             return;
++        case 'attachTexture':
++            $('textureFile').click();
++            return;
+         case 'import':
+             $('file').click();
+             return;
+@@ -467,6 +474,35 @@
+ });
+ document.addEventListener('change', async (e) => {
+     let el = e.target;
++    if (el.id === 'surveyTextures') {
++        site.showTextures = el.checked;
++        walk.invalidate();
++        persist();
++    }
++    if (el.id === 'textureFile') {
++        const target = site, file = el.files[0];
++        el.value = '';
++        if (!file) return;
++        try {
++            const reader = new FileReader();
++            const data = await new Promise((resolve, reject) => {
++                reader.onload = () => resolve(reader.result);
++                reader.onerror = reject;
++                reader.readAsDataURL(file);
++            });
++            if (!/^data:image\/(jpeg|png|webp);base64,/i.test(data)) throw Error();
++            const preview = new Image();
++            preview.src = data;
++            await preview.decode();
++            if (target !== site) return;
++            site.textureImage = data;
++            site.showTextures = true;
++            msg = 'Texture aligned to the full survey extent.';
++            persist();
++        } catch { msg = 'Choose a readable JPEG, PNG, or WebP image.'; }
++        render();
++        return;
++    }
+     if (el.id === 'file') {
+         try {
+             let data = JSON.parse(await el.files[0].text());
+--- a/erfmap-survey/walk.js
++++ b/erfmap-survey/walk.js
+@@ -26,7 +26,7 @@
+             tint=col;uv=pos.xy/extent;textured=ground;depth=d;elevation=pos.z;}`));
+         gl.attachShader(program,shader(gl.FRAGMENT_SHADER,`
+             precision mediump float;varying vec3 tint;varying vec2 uv;varying float textured,depth,elevation;
+-            uniform sampler2D land,heat;uniform float fog,heatOn,contourInterval,wet;uniform vec3 ambient,skyTint;
++            uniform sampler2D land,heat;uniform float fog,heatOn,contourInterval,wet,showPhoto;uniform vec3 ambient,skyTint;
+             void main(){vec3 rgb=tint*mix(vec3(1.),texture2D(land,uv).rgb,max(textured,0.));
+             rgb*=ambient*mix(1.,wet,max(textured,0.));
+             if(heatOn>.5 && textured>=0.){vec4 h=texture2D(heat,uv);rgb=mix(rgb,h.rgb,h.a*.94); }
+@@ -36,7 +36,8 @@
+                 float contour=abs(fract(elevation/contourInterval+.5)-.5);
+                 ink+=.18*(1.-smoothstep(.008,.025,contour))*(1.-smoothstep(15.,70.,depth));
+             }
+-            gl_FragColor=vec4(vec3(mix(ink,skyTint.r,smoothstep(fog*.45,fog*1.6,depth)*.65)),1.);}`));
++            vec3 material = showPhoto>.5 && textured>.5 ? rgb : vec3(ink);
++            gl_FragColor=vec4(mix(material,skyTint,smoothstep(fog*.45,fog*1.6,depth)*.65),1.);}`));
+         gl.linkProgram(program);if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(program));
+         gl.useProgram(program);buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);
+         for(const [name,n,offset] of [['pos',3,0],['col',3,12],['ground',1,24]]){
+@@ -67,17 +68,21 @@
+         vertices=[];scene=site;const tex=document.createElement('canvas');tex.width=tex.height=1024;
+         const ctx=tex.getContext('2d');ctx.scale(1024/site.w,1024/site.h);
+         ctx.fillStyle=style==='realistic'?'#92957b':'#b3c97c';ctx.fillRect(0,0,site.w,site.h);
+-        const groundFeatures=site.features.filter(f=>(kinds[f.kind][2]==='area'&&f.kind!=='building')||['path','crossing'].includes(f.kind));
++        const photo = surveyTexture.active(site);
++        const paint = photo && ctx.createPattern(photo, 'no-repeat');
++        if (paint) paint.setTransform(new DOMMatrix().scale(site.w / photo.width, site.h / photo.height));
++        const groundFeatures=site.features.filter(f=>(kinds[f.kind][2]==='area'&&f.kind!=='building')||['path','crossing'].includes(f.kind)||(paint && surveyTexture.eligible(f) && ['building','roadLine'].includes(f.kind)));
+         for(const f of groundFeatures.sort((a,b)=>Number(kinds[a.kind][2]!=='area')-Number(kinds[b.kind][2]!=='area'))){
++            const material = paint && surveyTexture.eligible(f) ? paint : featureColor(f);
+             ctx.beginPath();f.p.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));
+-            if(kinds[f.kind][2]==='area'){ctx.closePath();ctx.fillStyle=featureColor(f);ctx.fill();}
+-            else{ctx.strokeStyle=featureColor(f);ctx.lineWidth=Math.max(1.1,Number(f.tagProperties?.width||1.55));ctx.lineJoin='round';ctx.stroke();}
++            if(kinds[f.kind][2]==='area'){ctx.closePath();ctx.fillStyle=material;ctx.fill();}
++            else{ctx.strokeStyle=material;ctx.lineWidth=Math.max(1.1,Number(f.tagProperties?.width||(f.kind==='roadLine'?6:1.55)));ctx.lineJoin='round';ctx.stroke();}
+         }
+         // Sparse ink marks and soft contact shadows on the illustrated ground.
+         const noise=i=>{const v=Math.sin(i*78.233+19.7)*43758.5453;return v-Math.floor(v);};
+         if(!bare){
+         ctx.save();
+-        for(const f of groundFeatures.filter(f=>f.kind==='grass'||f.kind==='water')){
++        for(const f of groundFeatures.filter(f=>(f.kind==='grass'||f.kind==='water') && !(paint && surveyTexture.eligible(f)))){
+             ctx.save();ctx.beginPath();f.p.forEach((q,i)=>i?ctx.lineTo(...q):ctx.moveTo(...q));ctx.closePath();ctx.clip();
+             const water=f.kind==='water';ctx.strokeStyle=water?'#d0efe950':'#42523535';ctx.lineWidth=water?.13:.09;
+             ctx.beginPath();for(let i=0;i<(playful?1200:4800);i++){
+@@ -114,7 +119,8 @@
+             const p=f.p[0],z=surface(p);
+             if(f.kind==='building'){
+                 const base=f.p.map(q=>[...q,surface(q)-.15]), roof=Math.max(...base.map(q=>q[2]))+(+f.height||5);
+-                const roofColor=featureColor(f), roofShape=f.tagProperties?.roofShape||'Flat';
++                const roofPhoto=Boolean(paint && surveyTexture.eligible(f));
++                const roofColor=roofPhoto?'#ffffff':featureColor(f), roofShape=f.tagProperties?.roofShape||'Flat';
+                 for(const [a,b] of edges(base,true)){
+                     const len=dist(a,b);if(len<.01)continue;face([a,b,[b[0],b[1],roof],[a[0],a[1],roof]],playful?featureColor(f):'#c9c5bb',.8+.14*Math.abs(b[0]-a[0])/len);
+                     // A thick painted fascia and a window surround give the block a toy-like profile.
+@@ -130,11 +136,11 @@
+                         face([[x-ux,y-uy,roof-2.7],[x+ux,y+uy,roof-2.7],[x+ux,y+uy,roof-1.4],[x-ux,y-uy,roof-1.4]],playful?'#82b4bc':'#596c75');}
+                     }
+                 }
+-                if(roofShape==='Flat')for(const patch of surfaceCells(f.p,site.w,site.h))face(patch.map(q=>[...q,roof]),roofColor);
++                if(roofShape==='Flat')for(const patch of surfaceCells(f.p,site.w,site.h))face(patch.map(q=>[...q,roof]),roofColor,1,Number(roofPhoto));
+                 else{
+                     const center=f.p.reduce((sum,q)=>[sum[0]+q[0]/f.p.length,sum[1]+q[1]/f.p.length], [0,0]);
+                     const peak=roof+(roofShape==='Pointed'?2.5:1.1);
+-                    for(const [a,b] of edges(f.p,true))face([[...a,roof],[...b,roof],[center[0],center[1],peak]],roofColor,.9+.1*Math.abs(b[0]-a[0])/Math.max(.01,dist(a,b)));
++                    for(const [a,b] of edges(f.p,true))face([[...a,roof],[...b,roof],[center[0],center[1],peak]],roofColor,.9+.1*Math.abs(b[0]-a[0])/Math.max(.01,dist(a,b)),Number(roofPhoto));
+                 }
+             }else if(f.kind==='roadLine'){
+                 const width=Math.max(.2,Number(f.tagProperties?.width||6)),half=width/2,color=featureColor(f);
+@@ -236,6 +242,7 @@
+         const mesh=elevationMesh(site), range=mesh.max-mesh.min;
+         gl.uniform1f(uniform('contourInterval'), contours && range>.01 ? (range<=5?.5:range<=20?1:10**Math.floor(Math.log10(range/10))) : 0);
+         gl.uniform1f(uniform('heatOn'),heat?1:0);
++        gl.uniform1f(uniform('showPhoto'),surveyTexture.active(site)?1:0);
+         gl.uniform3f(uniform('eye'),camera.x,camera.y,(camera.feet??surface([camera.x,camera.y]))+1.7);
+         gl.uniform2f(uniform('turn'),Math.cos(camera.yaw),Math.sin(camera.yaw));gl.uniform2f(uniform('tilt'),Math.cos(camera.pitch),Math.sin(camera.pitch));
+         gl.uniform2f(uniform('extent'),site.w,site.h);gl.uniform1f(uniform('aspect'),w/h);gl.uniform1f(uniform('fog'),Math.max(site.w,site.h)*light.fog);
+--- a/erfmap-survey/style.css
++++ b/erfmap-survey/style.css
+@@ -246,7 +246,7 @@
+   background-color:#111;background-image:radial-gradient(#494949 .8px,transparent 1px);
+   background-size:18px 18px
+ }
+-#map:not(.analysis-map){filter:grayscale(1) invert(1)}
++#map:not(.analysis-map):not(.textured-map){filter:grayscale(1) invert(1)}
+ #map.analysis-map{background:#242424}
+ body .workspace aside,body.walking .workspace aside{color:#ddd;background:#171717fa;border:1px solid #505050;border-radius:2px}
+ body button,.bar .tabs button,.feature-grid button,#propertiesDialog{border-radius:2px}
+--- a/README.md
++++ b/README.md
+@@ -25,10 +25,18 @@
+ | Point | tree, bin, bench, light, entrance, destination |
+ | Point with a third coordinate in metres | ground |
+ 
+-Export bare-earth elevation samples as ground points in the same collection. The app interpolates these samples by inverse squared distance for the terrain preview. With no samples it displays a flat site. The rectangular site extent comes from the imported coordinates. This version does not directly read raster DEMs, imagery, or raw drone footage.
++Export bare-earth elevation samples as ground points in the same collection. The app interpolates these samples by inverse squared distance for the terrain preview. With no samples it displays a flat site. The rectangular site extent comes from the imported coordinates. Use a north-up orthophoto cropped to this extent for surface textures.
+ 
+ Set properties.confirmed to true on walkable paths and crossings, or confirm them in the inspector. Only shared vertices connect. Trash Can analysis associates cans within 5 m of confirmed paths. Trip anchors can connect to nearby open ground. Buildings, water and roads constrain routing. Only confirmed crossing segments can cross a road. Movement is simulated from assumptions, with no trained behavioral model.
+ 
+-The first-person walkthrough uses the Realistic visual style with procedural natural colors and materials. Imported surface textures may be added later.
++The first-person walkthrough uses the Realistic visual style with procedural natural colors and materials. Survey textures can replace the illustrated material on mapped ground surfaces and roofs.
++
++### Try the aerial texture test
++
++Use **Import survey** to open `examples/museum-texture-test.json`. In **Settings**, switch **Survey textures** off and on, then place the walker to compare the same surfaces in 3D. The sample embeds the image so it works offline. The standalone JPEG is `examples/american-history-aerial.jpg`.
++
++The sample uses [USGS NAIP aerial imagery](https://imagery.nationalmap.gov/arcgis/rest/services/USGSNAIPImagery/ImageServer) of the National Museum of American History, Washington, DC. Ground areas and the roof were traced by hand. Heights are approximate and terrain is flat.
++
++For your own geometry, open the survey first. Under **File**, choose **Attach aligned texture…** and select a north-up JPEG, PNG, or WebP cropped to the full rectangular extent of that survey. Image corners map to the survey corners. Save the scenario to package the image with the geometry. Trees, standalone objects, proposed features, and vertical walls use their existing materials. Objects and shadows captured in the source photo may be visible within textured surfaces.
+ 
+ In Simulate, set the time of day and choose Clear, Overcast, Rain, Fog, or Snow. These scenario conditions are saved with the site. Time remains fixed during playback. The 3D preview changes sky, lighting and visibility, with falling rain or snow. Reduced-motion settings freeze precipitation. Weather and time affect route choice and optional stops. See [Pedestrian behavior](PEDESTRIANS.md) for every feature rule.
+--- /dev/null
++++ b/survey-texture.js
+@@ -0,0 +1,44 @@
++// One north-up orthophoto covers the site's local-metre rectangle.
++const surveyTexture = (() => {
++    const surfaces = new Set(['building', 'grass', 'soil', 'shrub', 'water', 'pavement', 'road', 'roadLine', 'path', 'crossing', 'solar', 'greenroof']);
++    let source, image, url, revision = 0;
++    function eligible(feature) {
++        return surfaces.has(feature.kind) && feature.source !== 'Proposed';
++    }
++    async function load(data) {
++        const current = ++revision;
++        source = data;
++        if (url) URL.revokeObjectURL(url);
++        url = image = null;
++        if (!data) return;
++        try {
++            if (typeof data !== 'string' || !/^data:image\/(jpeg|png|webp);base64,/i.test(data))
++                throw Error('Unsupported image');
++            const bytes = Uint8Array.from(atob(data.slice(data.indexOf(',') + 1)), c => c.charCodeAt(0));
++            url = URL.createObjectURL(new Blob([bytes], {type: data.slice(5, data.indexOf(';'))}));
++            const next = new Image();
++            next.src = url;
++            await next.decode();
++            if (current !== revision) return;
++            image = next;
++        } catch {
++            if (current !== revision) return;
++            msg = 'Could not read the survey texture. Attach a JPEG, PNG, or WebP image.';
++        }
++        walk.invalidate();
++        render();
++    }
++    function sync(site) {
++        if (source !== site.textureImage) load(site.textureImage);
++        const toggle = document.getElementById('surveyTextures');
++        toggle.disabled = !image;
++        toggle.checked = Boolean(image && site.showTextures);
++    }
++    function active(site) { return site.showTextures && source === site.textureImage && image; }
++    function definition(site, project, scale) {
++        if (!active(site)) return '';
++        const [x, y] = project([0, 0]), w = site.w * scale, h = site.h * scale;
++        return '<defs><pattern id="survey-photo" patternUnits="userSpaceOnUse" patternTransform="translate('+x+' '+y+')" width="'+w+'" height="'+h+'"><image href="'+url+'" width="'+w+'" height="'+h+'" preserveAspectRatio="none"/></pattern></defs>';
++    }
++    return {eligible, active, definition, sync};
++})();
+--- /dev/null
++++ b/erfmap-survey/survey-texture.js
+@@ -0,0 +1,44 @@
++// One north-up orthophoto covers the site's local-metre rectangle.
++const surveyTexture = (() => {
++    const surfaces = new Set(['building', 'grass', 'soil', 'shrub', 'water', 'pavement', 'road', 'roadLine', 'path', 'crossing', 'solar', 'greenroof']);
++    let source, image, url, revision = 0;
++    function eligible(feature) {
++        return surfaces.has(feature.kind) && feature.source !== 'Proposed';
++    }
++    async function load(data) {
++        const current = ++revision;
++        source = data;
++        if (url) URL.revokeObjectURL(url);
++        url = image = null;
++        if (!data) return;
++        try {
++            if (typeof data !== 'string' || !/^data:image\/(jpeg|png|webp);base64,/i.test(data))
++                throw Error('Unsupported image');
++            const bytes = Uint8Array.from(atob(data.slice(data.indexOf(',') + 1)), c => c.charCodeAt(0));
++            url = URL.createObjectURL(new Blob([bytes], {type: data.slice(5, data.indexOf(';'))}));
++            const next = new Image();
++            next.src = url;
++            await next.decode();
++            if (current !== revision) return;
++            image = next;
++        } catch {
++            if (current !== revision) return;
++            msg = 'Could not read the survey texture. Attach a JPEG, PNG, or WebP image.';
++        }
++        walk.invalidate();
++        render();
++    }
++    function sync(site) {
++        if (source !== site.textureImage) load(site.textureImage);
++        const toggle = document.getElementById('surveyTextures');
++        toggle.disabled = !image;
++        toggle.checked = Boolean(image && site.showTextures);
++    }
++    function active(site) { return site.showTextures && source === site.textureImage && image; }
++    function definition(site, project, scale) {
++        if (!active(site)) return '';
++        const [x, y] = project([0, 0]), w = site.w * scale, h = site.h * scale;
++        return '<defs><pattern id="survey-photo" patternUnits="userSpaceOnUse" patternTransform="translate('+x+' '+y+')" width="'+w+'" height="'+h+'"><image href="'+url+'" width="'+w+'" height="'+h+'" preserveAspectRatio="none"/></pattern></defs>';
++    }
++    return {eligible, active, definition, sync};
++})();
+--- a/erfmap-survey/walk.js
++++ b/erfmap-survey/walk.js
+@@ -141,7 +141,7 @@
+                 for(const [a,b] of edges(f.p)){
+                     const length=dist(a,b);if(length<.001)continue;
+                     const nx=-(b[1]-a[1])/length*half,ny=(b[0]-a[0])/length*half;
+-                    face([[a[0]+nx,a[1]+ny],[b[0]+nx,b[1]+ny],[b[0]-nx,b[1]-ny],[a[0]-nx,a[1]-ny]].map(q=>[...q,surface(q)+.035]),color);
++                    face([[a[0]+nx,a[1]+ny],[b[0]+nx,b[1]+ny],[b[0]-nx,b[1]-ny],[a[0]-nx,a[1]-ny]].map(q=>[...q,surface(q)+.035]),paint && surveyTexture.eligible(f)?'#ffffff':color,1,Number(Boolean(paint && surveyTexture.eligible(f))));
+                 }
+             }else if(f.kind==='tree'){
+                 const growth=Math.max(2,Math.min(40,Number(f.tagProperties?.maxGrowth||16))),size=growth/18,treeColor=featureColor(f);

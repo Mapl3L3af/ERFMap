@@ -12,6 +12,13 @@ spec.loader.exec_module(worker)
 
 
 class VideoDetailTest(unittest.TestCase):
+    def test_oblique_photo_is_allowed_only_for_photogrammetry(self):
+        def frame(sharpness=100):
+            return {'metrics': {'sharpness':sharpness,'brightness':120,'texture':.1,'sky_band':True}}
+        self.assertFalse(worker.score_frames([frame()], None)['frames'][0]['usable'])
+        self.assertTrue(worker.score_frames([frame()], None, allow_oblique=True)['frames'][0]['usable'])
+        self.assertFalse(worker.score_frames([frame(1)], None, allow_oblique=True)['frames'][0]['usable'])
+
     def test_long_video_extraction_covers_every_section(self):
         with tempfile.TemporaryDirectory() as directory:
             out = Path(directory)

@@ -1,13 +1,14 @@
 // Shared by the intake page (browser) and the server (Node): stage list, review
 // merging, conversion to erfMap's fieldform-site-v1 scenario, and the GLB export.
 (function (root, factory) {
-    const api = factory();
+    const api = factory(typeof module !== 'undefined' ? require('../erfmap-survey/model') : root);
     if (typeof module !== 'undefined') module.exports = api; else root.intakeShared = api;
-})(typeof self !== 'undefined' ? self : this, function () {
+})(typeof self !== 'undefined' ? self : this, function (ground) {
     'use strict';
     const STAGES = [
         {id: 'probe', title: 'Video & metadata', worker: true},
         {id: 'frames', step: 1, title: 'Frame selection', worker: true},
+        {id: 'capture', title: 'Capture checks', worker: true},
         {id: 'correction', step: 2, title: 'Image correction', worker: true},
         {id: 'markers', title: 'Scale calibration', worker: true},
         {id: 'regions', step: 3, title: 'Region detection', worker: true},
@@ -17,7 +18,7 @@
         {id: 'review', step: 7, title: 'Review & export', worker: false},
     ];
     const MARGIN = 2;
-    const NO_ELEVATION = 'The video has no GPS or altimetry, and no elevation model (for example an OpenDroneMap DSM) is connected, so ground height is unknown.';
+    const NO_ELEVATION = 'This pipeline performs planar image alignment, not Structure from Motion, and has no reconstructed elevation model. Relative terrain heights require a scaled, gravity-aligned reconstruction and ground filtering; precise GPS altitude is not required.';
 
     const geometryOf = (labels, kind) => (labels.find(l => l.kind === kind) || {geometry: 'area'}).geometry;
     const labelOf = (labels, kind) => (labels.find(l => l.kind === kind) || {label: kind}).label;
@@ -85,6 +86,7 @@
                 id: f.id, kind, geometry: type, p, region, name: e.name || f.name || labelOf(labels, kind),
                 predictedKind: f.predicted_kind || null, confidence: f.confidence ?? null, frames: f.frames || [],
                 flags: (f.flags || []).filter(x => !(e.kind && ['unlabelled', 'needs label'].includes(x))), note: f.note || null, width: f.width_m ?? null,
+                widths: !e.p && (!e.kind || e.kind === f.kind) && Array.isArray(f.widths_m) && f.widths_m.length === p.length-1 ? f.widths_m : null,
                 height: Number.isFinite(e.height) ? e.height : null, status: e.status || 'proposed',
                 edited: Boolean(e.p || (e.kind && e.kind !== f.kind) || e.name), reviewedAt: e.reviewedAt || null,
                 image: f.image || null, calibration: f.calibration || null, size: sizeOf(type, p),
@@ -123,6 +125,10 @@
     }
 
     function buildSite({job, geometry, features, labels}) {
+        const mapReference = job.mapReference ? {source:job.mapReference.source, status:job.mapReference.status,
+            anchors:job.mapReference.anchors, transform:job.mapReference.transform, featureCount:job.mapReference.features.length,
+            terrainCheck:geometry.referenceTerrainCheck || null,
+            note:'Reference-assisted classification; reference agreement is not independent accuracy.'} : null;
         const accepted = features.filter(f => f.status === 'accepted');
         const all = accepted.flatMap(f => f.p);
         const minX = all.length ? Math.min(...all.map(p => p[0])) : 0, minY = all.length ? Math.min(...all.map(p => p[1])) : 0;
@@ -133,10 +139,14 @@
             const feature = {kind: f.kind, p: f.p.map(shift), name: f.name, source: 'Drone intake'};
             if (f.height) feature.height = f.height;
             if (f.width && f.geometry === 'line') feature.tagProperties = {width: +f.width.toFixed(2)};
+            if (f.widths && f.geometry === 'line' && f.widths.length === f.p.length-1 && f.widths.every(v => Number.isFinite(v) && v > 0)) {
+                feature.tagProperties = {...feature.tagProperties, widthProfile: f.widths, widthProfileBase: feature.tagProperties.width};
+            }
             feature.intake = {
-                job: job.id, video: job.original.name, feature: f.id, predictedKind: f.predictedKind, confidence: f.confidence,
+                job: job.id, video: job.original.name, captureProfile: job.captureProfile || null, feature: f.id, predictedKind: f.predictedKind, confidence: f.confidence,
                 frames: f.frames, reviewStatus: 'accepted', reviewedAt: f.reviewedAt, editedByReviewer: f.edited,
                 heightSource: f.height ? 'reviewer estimate, not measured' : null,
+                referenceSource: mapReference?.source || null,
             };
             if (f.image) {
                 feature.intake.sourceImage = f.image.source || f.image.frame;
@@ -151,9 +161,15 @@
             name: 'Drone survey · ' + job.name.replace(/\.[^.]+$/, ''),
             w: sceneBounds ? (geometry.mosaic.width - 1) * geometry.scale.m_per_px : +((xs.length ? Math.max(...xs) : 0) + MARGIN).toFixed(2),
             h: sceneBounds ? (geometry.mosaic.height - 1) * geometry.scale.m_per_px : +((ys.length ? Math.max(...ys) : 0) + MARGIN).toFixed(2),
-            features: out, samples: [], showContours: false,
+            features: out, samples: (geometry.terrain?.samples || []).map(p => [...shift(p.slice(0, 2)), p[2]]),
+            showContours: Boolean(geometry.terrain),
+            ...(geometry.terrain?.groundGrid ? {groundGrid: {...geometry.terrain.groundGrid, origin: shift(geometry.terrain.groundGrid.origin)}} : {}),
+            ...(geometry.terrain ? {terrain: {...geometry.terrain, samples: undefined, contours: undefined},
+                contours: geometry.terrain.contours.map(c => ({height: c.height, points: c.points.map(shift)}))} : {}),
             ...(job.sceneMode === 'stitched' ? {accessReviewed: true} : {}),
             localScale: scale.mode === 'per-image' ? {
+                mapReference,
+                captureProfile: job.captureProfile || null,
                 label: 'Locally scaled, unreferenced', unreferenced: true,
                 method: 'One measured distance per photo; each photo scaled on its own',
                 images: (scale.images || []).map(i => ({image: i.source || i.frame, reference: i.reference, metres: i.metres, label: i.label, segmentPx: i.segment_px, metresPerPixel: i.m_per_px, flags: i.flags})),
@@ -161,6 +177,8 @@
                 limits: 'Approximate. Not survey-grade, no geographic coordinates, no measured heights. Perspective, camera tilt, terrain and lens distortion are not removed; sizes far from a photo\'s measured segment are less reliable.',
                 job: job.id,
             } : {
+                mapReference,
+                captureProfile: job.captureProfile || null,
                 label: 'Locally scaled, unreferenced', unreferenced: true,
                 method: '1 ft (0.3048 m) ground markers', markers: scale.markers || 0,
                 metresPerPixel: scale.m_per_px || null, markerDisagreement: scale.spread ?? null,
@@ -186,8 +204,8 @@
         return {
             format: 'glTF 2.0 binary (.glb)', units: 'metres', upAxis: 'Y (glTF convention); map x → glTF X, map y → glTF Z',
             referenced: false, label: 'Locally scaled, unreferenced',
-            elevation: {status: 'flat', value: 0, reason: NO_ELEVATION},
-            contours: {available: false, reason: 'Contours need an elevation model. ' + NO_ELEVATION},
+            elevation: site.samples?.length ? {status: 'terrain', reason: site.terrain?.note || 'Interpolated from supplied ground samples; heights are relative to the supplied datum.'} : {status: 'flat', value: 0, reason: NO_ELEVATION},
+            contours: site.terrain ? {available: true, reason: site.terrain.note, interval_m: site.terrain.interval_m, source: site.terrain.source} : {available: false, reason: 'Contours need an elevation model. ' + NO_ELEVATION},
             extent: [site.w, site.h],
             features: site.features.map(f => ({name: f.name, kind: f.kind, ...describe(f, labels ? geometryOf(labels, f.kind) : f.p.length === 1 ? 'point' : 'area')})),
         };
@@ -256,8 +274,8 @@
                 const len = Math.hypot(...n) || 1; n = n.map(x => x / len);
                 [a, b, c].forEach((p, j) => { pos.set(p, i * 9 + j * 3); nor.set(n, i * 9 + j * 3); });
             });
-            const min = [0, 1, 2].map(k => Math.min(...Array.from({length: pos.length / 3}, (_, i) => pos[i * 3 + k])));
-            const max = [0, 1, 2].map(k => Math.max(...Array.from({length: pos.length / 3}, (_, i) => pos[i * 3 + k])));
+            const min=[Infinity,Infinity,Infinity],max=[-Infinity,-Infinity,-Infinity];
+            for(let i=0;i<pos.length;i++){min[i%3]=Math.min(min[i%3],pos[i]);max[i%3]=Math.max(max[i%3],pos[i]);}
             accessors.push({bufferView: push(pos, 34962), componentType: 5126, count: pos.length / 3, type: 'VEC3', min, max});
             accessors.push({bufferView: push(nor, 34962), componentType: 5126, count: nor.length / 3, type: 'VEC3'});
             meshes.push({name, primitives: [{attributes: {POSITION: accessors.length - 2, NORMAL: accessors.length - 1}, material: material(kind, color)}]});
@@ -268,22 +286,33 @@
             const tris = [];
             for (let i = 0; i < line.length - 1; i++) {
                 const a = line[i], b = line[i + 1], len = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
-                const o = [-(b[1] - a[1]) / len * width / 2, (b[0] - a[0]) / len * width / 2];
+                const localWidth = Array.isArray(width) ? width[i] : width;
+                const o = [-(b[1] - a[1]) / len * localWidth / 2, (b[0] - a[0]) / len * localWidth / 2];
                 const q = [[a[0] + o[0], a[1] + o[1]], [b[0] + o[0], b[1] + o[1]], [b[0] - o[0], b[1] - o[1]], [a[0] - o[0], a[1] - o[1]]];
                 tris.push(...flat(q, z));
             }
             return tris;
         }
-        addMesh('Survey extent (flat, elevation unknown)', '_ground', '#8f8f86', flat([[0, 0], [site.w, 0], [site.w, site.h], [0, site.h]], 0), {note: NO_ELEVATION});
+        const height = p => site.groundGrid ? ground.groundGridHeight(site.groundGrid,...p) : ground.terrain({...site,samples:site.samples||[]},...p);
+        let groundFaces=[];
+        if(site.groundGrid) groundFaces=ground.groundGridFaces(site.groundGrid);
+        else if(site.samples?.length){
+            const n=48;
+            for(let y=0;y<n;y++)for(let x=0;x<n;x++){
+                const p=[[x,y],[x+1,y],[x+1,y+1],[x,y+1]].map(([i,j])=>{const q=[i*site.w/n,j*site.h/n];return [...q,height(q)];});
+                groundFaces.push([p[0],p[1],p[2]],[p[0],p[2],p[3]]);
+            }
+        } else groundFaces=flat([[0,0],[site.w,0],[site.w,site.h],[0,site.h]],0);
+        addMesh(site.samples?.length ? 'Ground terrain' : 'Survey extent (flat, elevation unknown)', '_ground', '#8f8f86', groundFaces, {note: site.terrain?.note || NO_ELEVATION});
         site.features.forEach((f, i) => {
             const label = labels.find(l => l.kind === f.kind) || {color: '#bcb6c4', geometry: 'area'};
-            const lift = 0.01 + (label.geometry === 'line' ? 0.02 : label.geometry === 'point' ? 0.03 : 0) + (i % 50) * 0.0002;
+            const lift = f.kind === 'grass' ? 0.005 : 0.01 + (label.geometry === 'line' ? 0.02 : label.geometry === 'point' ? 0.03 : 0) + (i % 50) * 0.0002;
             let tris;
             if (label.geometry === 'point') {
                 const [x, y] = f.p[0], r = POINT_SIZE / 2;
                 tris = flat([[x - r, y - r], [x + r, y - r], [x + r, y + r], [x - r, y + r]], lift);
             } else if (label.geometry === 'line') {
-                tris = ribbon(f.p, Number(f.tagProperties?.width) > 0 ? Number(f.tagProperties.width) : DEFAULT_LINE_WIDTH, lift);
+                tris = ribbon(f.p, ground.featureSegmentWidths ? ground.featureSegmentWidths(f, DEFAULT_LINE_WIDTH) : Number(f.tagProperties?.width) || DEFAULT_LINE_WIDTH, lift);
             } else if (f.height) {
                 const top = f.height;
                 tris = flat(f.p, top);
@@ -292,10 +321,21 @@
                     tris.push([[...a, 0], [...b, 0], [...b, top]], [[...a, 0], [...b, top], [...a, top]]);
                 });
             } else tris = flat(f.p, lift);
+            tris=tris.filter(t=>t.every(p=>height(p.slice(0,2))!==null)).map(t=>t.map(p=>[p[0],p[1],p[2]+height(p.slice(0,2))]));
             addMesh(f.name, f.kind, label.color, tris, {kind: f.kind, ...describe(f, label.geometry), intake: f.intake || null});
         });
+        // Contour polylines are geometry as well as editable scenario metadata.
+        if(site.showContours!==false && site.contours?.length){
+            const points=site.contours.flatMap(c=>c.points.map(p=>[p[0],c.height+.025,p[1]]));
+            const pos=new Float32Array(points.flat()),min=[Infinity,Infinity,Infinity],max=[-Infinity,-Infinity,-Infinity];
+            for(const p of points)for(let k=0;k<3;k++){min[k]=Math.min(min[k],p[k]);max[k]=Math.max(max[k],p[k]);}
+            accessors.push({bufferView:push(pos,34962),componentType:5126,count:points.length,type:'VEC3',min,max});
+            meshes.push({name:'Relative ground contours',primitives:[{attributes:{POSITION:accessors.length-1},mode:1,material:material('_contours','#303a31')}]});
+            nodes.push({name:'Relative ground contours',mesh:meshes.length-1,extras:{units:'metres',datum:site.terrain?.verticalDatum||'Supplied ground datum'}});
+        }
         const gltf = {
-            asset: {version: '2.0', generator: 'erfMap video intake', extras: {label: 'Locally scaled, unreferenced', units: 'metres', elevation: 'flat (0 m): ' + NO_ELEVATION, localScale: site.localScale || null}},
+            asset: {version: '2.0', generator: 'erfMap video intake', extras: {label: 'Locally scaled, unreferenced', units: 'metres', elevation: site.samples?.length ? 'Terrain from supplied ground samples' : 'flat (0 m): ' + NO_ELEVATION, localScale: site.localScale || null}},
+            extras: {erfmap: {format: 'fieldform-site-v1', site}},
             scene: 0, scenes: [{name: site.name, nodes: nodes.map((_, i) => i)}], nodes, meshes, materials, accessors, bufferViews,
             buffers: [{byteLength: offset}],
         };
@@ -313,5 +353,14 @@
         return out;
     }
 
-    return {STAGES, NO_ELEVATION, centroid, axis, shapeFor, sizeOf, reviewedFeatures, buildSite, modelSummary, triangulate, buildGlb, geometryOf, segmentPoint, pathEnds, edgeAccess};
+    function readGlb(bytes) {
+        const v=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+        if(bytes.length<20||v.getUint32(0,true)!==0x46546c67||v.getUint32(4,true)!==2||v.getUint32(8,true)!==bytes.length||v.getUint32(16,true)!==0x4e4f534a)throw Error('Invalid glTF binary file.');
+        const n=v.getUint32(12,true);
+        if(n>bytes.length-20)throw Error('Truncated glTF JSON chunk.');
+        const data=JSON.parse(new TextDecoder().decode(bytes.subarray(20,20+n))).extras?.erfmap;
+        if(data?.format!=='fieldform-site-v1')throw Error('This model has no editable erfMap survey. Import an erfMap-exported GLB or a scenario JSON.');
+        return data;
+    }
+    return {readGlb, STAGES, NO_ELEVATION, centroid, axis, shapeFor, sizeOf, reviewedFeatures, buildSite, modelSummary, triangulate, buildGlb, geometryOf, segmentPoint, pathEnds, edgeAccess};
 });

@@ -69,8 +69,9 @@ class SceneReviewTest(unittest.TestCase):
             return any(cv2.pointPolygonTest(np.array(g['p'], np.float32), point, False) > 0 for g in lawns)
         self.assertTrue(covered((2, 8)))
         self.assertTrue(covered((22, 8)))
-        self.assertFalse(covered((16, 8)))
-        self.assertFalse(covered((5.7, 8)))
+        self.assertTrue(covered((16, 8)))
+        self.assertTrue(covered((5.7, 8)))
+        self.assertEqual(len(lawns), 1)
 
     def test_click_reclassifies_path_and_preserves_accepted_building_exactly(self):
         features = [{**g, 'status': 'accepted' if g['id'] == 'roof' else 'proposed'} for g in self.geometry['features']]

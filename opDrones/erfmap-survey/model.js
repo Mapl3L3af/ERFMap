@@ -163,7 +163,29 @@ function graph(site) {
     }
     return {walkingNetwork,nodes, links:split, bins, connectedBins:binNodes.length, totalBins:allBins.length};
 }
-function terrain(site, x, y) { let s = 0, w = 0; for (const p of site.samples) {
+// Registered ground grids preserve observation gaps; no extrapolated heights.
+function validateGroundGrid(g) {
+    if (!g || !['origin','step'].every(k => Array.isArray(g[k]) && g[k].length===2 && g[k].every(Number.isFinite)) || g.step.some(v=>v<=0)
+        || !Array.isArray(g.heights) || g.heights.length<2 || g.heights.length>256 || !Array.isArray(g.heights[0]) || g.heights[0].length<2 || g.heights[0].length>256
+        || !g.heights.every(r=>Array.isArray(r)&&r.length===g.heights[0].length&&r.every(z=>z===null||Number.isFinite(z)))) throw Error('Invalid ground grid: use 2–256 rows and columns, metre origin/spacing, and null for missing observations.');
+    return g;
+}
+function groundGridHeight(g,x,y) {
+    const u=(x-g.origin[0])/g.step[0],v=(y-g.origin[1])/g.step[1],w=g.heights[0].length,h=g.heights.length;
+    if(u<0||v<0||u>w-1||v>h-1)return null;
+    const i=Math.min(w-2,Math.floor(u)),j=Math.min(h-2,Math.floor(v)),a=u-i,b=v-j;
+    const [tl,tr,br,bl]=[g.heights[j][i],g.heights[j][i+1],g.heights[j+1][i+1],g.heights[j+1][i]];
+    if([tl,tr,br,bl].includes(null))return null;
+    return a>b?tl*(1-a)+tr*(a-b)+br*b:tl*(1-b)+bl*(b-a)+br*a;
+}
+function groundGridFaces(g) {
+    const faces=[];
+    for(let y=0;y<g.heights.length-1;y++)for(let x=0;x<g.heights[0].length-1;x++){
+        const p=[[x,y],[x+1,y],[x+1,y+1],[x,y+1]].map(([i,j])=>[g.origin[0]+i*g.step[0],g.origin[1]+j*g.step[1],g.heights[j][i]]);
+        if(p.every(q=>q[2]!==null))faces.push([p[0],p[1],p[2]],[p[0],p[2],p[3]]);
+    }return faces;
+}
+function terrain(site, x, y) { if(site.groundGrid)return groundGridHeight(site.groundGrid,x,y) ?? 0; let s = 0, w = 0; for (const p of site.samples) {
     const d = (x - p[0]) ** 2 + (y - p[1]) ** 2;
     if (d < 1e-8)
         return p[2];
@@ -240,7 +262,15 @@ function surfaceCells(poly, w, h) {
     return result;
 }
 
-function restore(s) { if (!s || ![s.w, s.h].every(v => Number.isFinite(v) && v > 0) || !Array.isArray(s.samples) || !s.samples.every(p => p.length === 3 && p.every(Number.isFinite)) || !Array.isArray(s.features) || !s.features.every(f => Object.hasOwn(kinds, f.kind) && Array.isArray(f.p) && f.p.length >= (kinds[f.kind][2] === 'area' ? 3 : kinds[f.kind][2] === 'point' ? 1 : 2) && f.p.every(p => p.length === 2 && p.every(Number.isFinite))) || (s.showContours !== undefined && typeof s.showContours !== 'boolean') || (s.contours !== undefined && (!Array.isArray(s.contours) || !s.contours.every(c => Number.isFinite(c.height) && Array.isArray(c.points) && c.points.length === 2 && c.points.every(p => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite))))))
-    throw Error('Invalid saved scenario.'); return s; }
+function featureSegmentWidths(feature, fallback = 1.8) {
+    const props = feature.tagProperties || {}, width = Number(props.width) > 0 ? Number(props.width) : fallback;
+    const profile = props.widthProfile;
+    // Editing width or vertex count restores ordinary, predictable line editing.
+    if (Number(props.widthProfileBase) === width && Array.isArray(profile) && profile.length === feature.p.length-1 && profile.every(v => Number.isFinite(v) && v > 0)) return profile;
+    return Array(Math.max(0, feature.p.length-1)).fill(width);
+}
 
-if (typeof module !== 'undefined') module.exports = {demo, restore, importSurvey, kinds};
+function restore(s) { if (!s || ![s.w, s.h].every(v => Number.isFinite(v) && v > 0) || !Array.isArray(s.samples) || !s.samples.every(p => Array.isArray(p) && p.length === 3 && p.every(Number.isFinite)) || !Array.isArray(s.features) || !s.features.every(f => f && Object.hasOwn(kinds, f.kind) && (f.height == null || (Number.isFinite(f.height) && f.height >= 0)) && Array.isArray(f.p) && f.p.length >= (kinds[f.kind][2] === 'area' ? 3 : kinds[f.kind][2] === 'point' ? 1 : 2) && f.p.every(p => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite))) || (s.showContours !== undefined && typeof s.showContours !== 'boolean') || (s.contours !== undefined && (!Array.isArray(s.contours) || !s.contours.every(c => c && Number.isFinite(c.height) && Array.isArray(c.points) && c.points.length === 2 && c.points.every(p => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite))))))
+    throw Error('Invalid saved scenario.'); if(s.groundGrid){validateGroundGrid(s.groundGrid);if(!groundGridFaces(s.groundGrid).length)throw Error('Ground grid has no observed cells.');} if(s.contourInterval !== undefined && (!Number.isFinite(s.contourInterval)||s.contourInterval<=0))throw Error('Invalid contour interval.'); if(s.contourInterval){let lo=Infinity,hi=-Infinity;for(const p of s.samples){lo=Math.min(lo,p[2]);hi=Math.max(hi,p[2]);}if((hi-lo)/s.contourInterval>200)throw Error('Contour interval produces more than 200 levels.');} return s; }
+
+if (typeof module !== 'undefined') module.exports = {demo, restore, importSurvey, kinds, terrain, validateGroundGrid, groundGridHeight, groundGridFaces, featureSegmentWidths};

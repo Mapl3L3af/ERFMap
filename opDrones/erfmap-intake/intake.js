@@ -22,17 +22,59 @@ const label = kind => labels.find(l => l.kind === kind) || {label: kind || 'Unla
 const pts = p => p.map(q => q.map(v => +v.toFixed(2)).join(',')).join(' ');
 const pct = v => v == null ? '—' : Math.round(v * 100) + '%';
 
+function mountReconstruction(host, {value, save} = {}) {
+    const detail = document.createElement('details');
+    detail.id = 'reconstruction'; detail.className = 'map-details';
+    detail.innerHTML = '<summary>Optional · Photogrammetry setup</summary>'
+        + '<p><label><input type="checkbox" data-enable> Use NodeODM for this flyover</label></p>'
+        + '<div data-fields hidden><p><label>NodeODM service URL <input type="url" data-url value="http://127.0.0.1:3001" placeholder="http://127.0.0.1:3001"></label></p>'
+        + '<p><label><input type="checkbox" data-building> Request a full 3D building model</label></p>'
+        + '<p>Include overlapping photos of the roofs and building sides for a building model. The selected service receives your original photos when processing starts.</p>'
+        + '<p>erfMap uses the orthophoto and terrain. Detailed building meshes stay in the downloadable photogrammetry files; they are not displayed in the survey.</p>'
+        + '<button type="button" data-check>Check connection</button></div>'
+        + '<p><a href="/info.html#reconstruction">Photo requirements and engine setup ↗</a></p>'
+        + (save ? '<button type="button" data-save>Save setup &amp; rebuild imagery</button><p>Rebuilding replaces scale calibration, detected features and their review decisions.</p>' : '')
+        + '<p data-status role="status"></p>';
+    host.append(detail);
+    const q = selector => detail.querySelector(selector);
+    q('[data-enable]').checked = value?.enabled === true;
+    q('[data-url]').value = value?.url || 'http://127.0.0.1:3001';
+    q('[data-building]').checked = value?.buildingModel === true;
+    const toggle = () => { q('[data-fields]').hidden = !q('[data-enable]').checked; };
+    q('[data-enable]').onchange = toggle; toggle();
+    const read = () => {
+        if (!q('[data-enable]').checked) return {enabled:false};
+        if (!q('[data-url]').reportValidity() || !q('[data-url]').value) throw Error('Enter the NodeODM service URL.');
+        return {enabled:true, url:q('[data-url]').value.trim(), buildingModel:q('[data-building]').checked};
+    };
+    q('[data-check]').onclick = async () => {
+        q('[data-check]').disabled = true; q('[data-status]').textContent = 'Checking NodeODM…';
+        try {
+            const result = await api('/api/intake/reconstruction-check', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(read())});
+            q('[data-status]').textContent = result.ready ? 'ODM '+result.version+' is ready'+(result.maxImages ? ' · up to '+result.maxImages+' photos' : '')+'.' : 'Photogrammetry is off.';
+        } catch (error) { q('[data-status]').textContent = error.message; }
+        finally { q('[data-check]').disabled = false; }
+    };
+    if (save) q('[data-save]').onclick = async () => {
+        q('[data-save]').disabled = true;
+        try { await save(read()); } catch (error) { q('[data-status]').textContent = error.message; }
+        finally { q('[data-save]').disabled = false; }
+    };
+    if (location.hash === '#reconstruction') detail.open = true;
+    return {read};
+}
+
 // ---------------------------------------------------------------- home
 async function home() {
     document.getElementById('newJob').hidden = true;
-    app.innerHTML = '<div class="home"><section class="upload-intro"><small class="cap">New flyover</small><h2>Add video or photos</h2>'
+    app.innerHTML = '<div class="home"><section class="upload-intro"><small class="cap">01 / OBSERVE YOUR SITE</small><h2>A healthier landscape starts here.</h2>'
         + '<p>Choose one drone video or overlapping overhead photos of the same site.</p>'
         + '<ol class="journey"><li><b>01</b> Add imagery</li><li><b>02</b> Set a distance</li><li><b>03</b> Review your map</li></ol></section>'
-        + '<section class="card upload-card"><div class="drop" id="drop"><h3>Drop your imagery here</h3><p>One video, or photos of the same site</p><label class="button primary" tabindex="0" id="filePicker">Choose video or photos<input type="file" id="video" multiple accept="video/*,image/*,.mp4,.mov,.mkv,.avi,.webm,.mts,.jpg,.jpeg,.png,.tif,.tiff,.webp" hidden></label><p class="cap" id="uploadName"></p><div class="bar" id="uploadBar" hidden><i style="width:0"></i></div></div>'
+        + '<section class="card upload-card"><div id="reconstructionSetup"></div><div class="drop" id="drop"><span class="upload-symbol" aria-hidden="true"></span><h3>Drop your imagery here</h3><p>One video, or photos of the same site</p><label class="button primary" tabindex="0" id="filePicker" role="button">Choose video or photos<input type="file" id="video" multiple accept="video/*,image/*,.mp4,.mov,.mkv,.avi,.webm,.mts,.jpg,.jpeg,.png,.tif,.tiff,.webp" hidden></label><p class="cap" id="uploadName"></p><div class="bar" id="uploadBar" hidden><i style="width:0"></i></div></div>'
         + '<p id="uploadStatus" role="status"></p><p class="upload-tip">Have a known ground distance handy, such as a sidewalk width. You’ll use it to set the map’s scale.</p>'
         + '<details class="map-details"><summary>About your map</summary><p>Maps use local distances, with no GPS position or elevation. Camera angle and terrain can affect accuracy; results are not survey-grade.</p></details></section>'
-        + '<section class="recent-section"><h3>Recent flyovers</h3><ul class="jobs" id="jobs"><li>Loading flyovers…</li></ul></section>'
         + '<details class="setup-details"><summary>Processing setup</summary><div id="caps"><p>Checking the worker…</p></div></details></div>';
+    uploadReconstruction = mountReconstruction(document.getElementById('reconstructionSetup'));
     const input = document.getElementById('video'), drop = document.getElementById('drop');
     document.getElementById('filePicker').onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } };
     input.onchange = () => input.files.length && upload([...input.files]);
@@ -40,13 +82,6 @@ async function home() {
     drop.ondragleave = () => drop.classList.remove('over');
     drop.ondrop = e => { e.preventDefault(); drop.classList.remove('over'); if (e.dataTransfer.files.length) upload([...e.dataTransfer.files]); };
     api('/api/intake/capabilities').then(renderCaps).catch(e => document.getElementById('caps').innerHTML = '<p class="no">' + esc(e.message) + '</p>');
-    api('/api/intake/jobs').then(list => {
-        document.getElementById('jobs').innerHTML = list.length ? list.map(j => {
-            const states = Object.values(j.stages);
-            const status = states.includes('processing') ? 'processing' : states.includes('failed') ? 'failed' : j.stages.review === 'complete' ? 'complete' : states.includes('needs_review') ? 'needs_review' : 'queued';
-            return '<li>' + chip(status) + '<a href="?job=' + j.id + '">' + esc(j.name) + '</a><span class="cap">' + new Date(j.createdAt).toLocaleString() + '</span></li>';
-        }).join('') : '<li class="empty-jobs">Your flyovers will appear here once you add imagery.</li>';
-    });
 }
 function renderCaps(c) {
     const row = (name, ok, text, optional) => '<li><b>' + name + '</b><span class="' + (ok ? 'ok' : optional ? 'opt' : 'no') + '">' + (ok ? '✓ ' : optional ? '○ ' : '✗ ') + esc(text) + '</span></li>';
@@ -78,7 +113,9 @@ function send(url, file, onProgress) {
         xhr.send(file);
     });
 }
-let uploading = false;
+let capturePinned = false;
+let referencePinned = false;
+let uploading = false, uploadReconstruction = null;
 async function upload(files) {
     if (uploading || !files.length) return;
     const bar = document.getElementById('uploadBar'), status = document.getElementById('uploadStatus');
@@ -88,6 +125,10 @@ async function upload(files) {
     if (videos.length && photos.length || videos.length > 1 || videos.length + photos.length !== files.length) {
         status.textContent = 'Choose either one video, or one or more photos (JPEG, PNG, TIFF or WebP).'; return;
     }
+    let reconstruction;
+    try { reconstruction = uploadReconstruction.read(); } catch (error) { status.textContent = error.message; return; }
+    if (reconstruction.enabled && (videos.length || photos.length < 3)) { status.textContent = 'Photogrammetry needs at least three overlapping original photographs.'; return; }
+    const setupQuery = reconstruction.enabled ? '&photogrammetry=1&nodeodm_url=' + encodeURIComponent(reconstruction.url) + (reconstruction.buildingModel ? '&building_model=1' : '') : '';
     const list = videos.length ? videos : photos, total = list.reduce((s, f) => s + f.size, 0);
     document.getElementById('uploadName').textContent = (videos.length ? list[0].name : list.length + ' photo' + (list.length > 1 ? 's' : '')) + ' · ' + (total / 1048576).toFixed(1) + ' MB';
     uploading = true;
@@ -99,7 +140,7 @@ async function upload(files) {
     const progress = loaded => { bar.firstElementChild.style.width = (total ? 100 * (done + loaded) / total : 0) + '%'; };
     try {
         status.textContent = 'Uploading… originals are kept unchanged.';
-        const created = await send('/api/intake/jobs?name=' + encodeURIComponent(list[0].name) + (photos.length ? '&defer=1' : ''), list[0], progress);
+        const created = await send('/api/intake/jobs?name=' + encodeURIComponent(list[0].name) + (photos.length ? '&defer=1' : '') + setupQuery, list[0], progress);
         done += list[0].size;
         for (const [i, file] of list.slice(1).entries()) {
             status.textContent = 'Uploading photo ' + (i + 2) + ' of ' + list.length + '…';
@@ -116,7 +157,9 @@ async function upload(files) {
 async function openJob(id) {
     document.getElementById('newJob').hidden = false;
     labels = (await api('/api/intake/labels')).labels;
-    app.innerHTML = '<div class="layout single-review"><aside><ol class="stages" id="stages"></ol><details class="source-details"><summary>Source imagery</summary><section id="original"></section></details></aside><section class="card" id="panel"><p>Loading…</p></section></div>';
+    app.innerHTML = '<div class="layout single-review"><aside><button type="button" id="openCapture">Capture checks</button><ol class="stages" id="stages"></ol><details class="source-details"><summary>Source imagery</summary><section id="original"></section><button type="button" id="openReference">Map reference</button></details></aside><section class="card" id="panel"><p>Loading…</p></section></div>';
+    document.getElementById('openReference').onclick=()=>{referencePinned=true;capturePinned=false;selected='markers';renderPanel();};
+    document.getElementById('openCapture').onclick = () => { capturePinned = true; selected = 'capture'; renderPanel(); };
     const events = new EventSource('/api/intake/jobs/' + id + '/events');
     events.addEventListener('job', e => update(JSON.parse(e.data)));
     events.onerror = () => { if (!job) app.innerHTML = '<div class="note err">That intake job could not be opened.</div>'; };
@@ -135,23 +178,33 @@ function update(next) {
             ? '<small class="cap">Original photos (kept unchanged)</small><p>' + originals.length + ' photo' + (originals.length > 1 ? 's' : '') + ' · ' + (originals.reduce((s, o) => s + o.size, 0) / 1048576).toFixed(1) + ' MB</p><details><summary>Files</summary><ul>' + originals.map(o => '<li><a href="' + fileUrl(o.path) + '" download>' + esc(o.name) + '</a></li>').join('') + '</ul></details>'
             : '<small class="cap">Original video (kept unchanged)</small><p>' + esc(job.original.name) + '<br><span class="cap">' + (job.original.size / 1048576).toFixed(1) + ' MB · uploaded ' + new Date(job.createdAt).toLocaleString() + '</span></p><a class="button" href="' + fileUrl(job.original.path) + '" download>Download original</a>';
     }
+    const archiveReady = job.reconstruction?.enabled && ['complete','needs_review'].includes(job.stages.correction.status);
+    if (!archiveReady) document.getElementById('reconstructionDownload')?.remove();
+    if (archiveReady && !document.getElementById('reconstructionDownload')) {
+        const download=document.createElement('p');download.id='reconstructionDownload';
+        download.innerHTML='<a href="'+fileUrl('nodeodm-all.zip')+'" download>Download photogrammetry files (ZIP)</a>';
+        document.getElementById('original').append(download);
+    }
     // Keep one workspace open, moving from reference line to processing to review.
     const unlocked = (job.calibration?.references || []).some(r => r.confirmed !== false);
-    const preparation = ['probe', 'frames', 'correction', 'markers'];
+    const preparation = ['probe', 'frames', 'capture', 'correction', 'markers'];
     const preparing = preparation.find(id => !['complete', 'needs_review'].includes(job.stages[id].status));
     const processing = S.STAGES.filter(s => s.worker && !preparation.includes(s.id));
     const waiting = processing.find(s => !['complete', 'needs_review'].includes(job.stages[s.id].status)
         && !(s.optional && job.stages[s.id].status === 'unavailable'));
     const previousSelected = selected;
-    selected = preparing || (!unlocked ? 'markers' : waiting?.id || 'review');
+    const capturePending = job.stages.capture?.status === 'needs_review' && !job.captureReview;
+    selected = referencePinned ? 'markers' : capturePinned || capturePending ? 'capture' : preparing || (!unlocked ? 'markers' : waiting?.id || 'review');
+    document.getElementById('openReference').disabled=!['complete','needs_review'].includes(job.stages.markers.status);
+    document.getElementById('openCapture').disabled = !['complete', 'needs_review'].includes(job.stages.capture?.status);
     renderStages();
     const state = job.stages[selected];
-    const key = [state.status, state.attempts, state.finishedAt, selected === 'review' ? job.imports?.length : ''].join('|');
+    const key = [state.status, state.attempts, state.finishedAt, selected === 'review' ? job.imports?.length : selected === 'capture' ? job.captureReview?.at : ''].join('|');
     if (previousSelected !== selected || shown[selected] !== key) { shown[selected] = key; delete results[selected]; renderPanel(); }
     else if (state.status === 'processing') renderHead();
 }
 function renderStages() {
-    const phase = ['probe', 'frames', 'correction'].includes(selected) ? 0 : selected === 'markers' ? 1 : selected === 'review' ? 3 : 2;
+    const phase = ['probe', 'frames', 'capture', 'correction'].includes(selected) ? 0 : selected === 'markers' ? 1 : selected === 'review' ? 3 : 2;
     const steps = ['Prepare imagery', 'Set the scale', 'Build the map', 'Review & finish'];
     document.getElementById('stages').innerHTML = steps.map((title, i) => '<li class="' + (i < phase ? 'done' : i === phase ? 'active' : '') + '"' + (i === phase ? ' aria-current="step"' : '') + '><span class="step-number">' + (i < phase ? '✓' : i + 1) + '</span><span>' + title + '</span></li>').join('');
 }
@@ -166,8 +219,8 @@ function guidance(stage) {
 }
 function headMarkup() {
     const meta = S.STAGES.find(s => s.id === selected), st = job.stages[selected];
-    const title = selected === 'markers' ? 'Set the scale' : selected === 'review' ? 'Review the map' : ['failed', 'unavailable'].includes(st.status) ? 'Processing needs attention' : ['probe', 'frames', 'correction'].includes(selected) ? 'Preparing your imagery' : 'Building your map';
-    let h = '<div class="panelhead"><div><small class="cap">' + (meta.id === 'markers' ? '1 · Reference line' : meta.id === 'review' ? '3 · Feature review' : ['probe', 'frames', 'correction'].includes(meta.id) ? 'Preparing reference image' : '2 · Processing') + '</small><h2>' + title + ' ' + chip(st.status) + '</h2><p>' + esc(st.summary || (st.status === 'blocked' ? 'Waiting for an earlier stage.' : st.status === 'queued' ? 'Queued.' : '')) + '</p></div>';
+    const title = selected === 'capture' ? 'Capture checks' : selected === 'markers' ? 'Set the scale' : selected === 'review' ? 'Review the map' : ['failed', 'unavailable'].includes(st.status) ? 'Processing needs attention' : ['probe', 'frames', 'capture', 'correction'].includes(selected) ? 'Preparing your imagery' : 'Building your map';
+    let h = '<div class="panelhead"><div><small class="cap">' + (meta.id === 'markers' ? '1 · Reference line' : meta.id === 'review' ? '3 · Feature review' : ['probe', 'frames', 'capture', 'correction'].includes(meta.id) ? 'Preparing reference image' : '2 · Processing') + '</small><h2>' + title + ' ' + chip(st.status) + '</h2><p>' + esc(st.summary || (st.status === 'blocked' ? 'Waiting for an earlier stage.' : st.status === 'queued' ? 'Queued.' : '')) + '</p></div>';
     if (meta.worker && ['failed', 'unavailable'].includes(st.status)) h += '<button type="button" class="primary" data-retry="' + selected + '">Retry this stage</button>';
     else if (meta.worker && ['complete', 'needs_review'].includes(st.status) && selected !== 'markers') h += '<button type="button" data-retry="' + selected + '" title="Earlier stages are kept. This stage and the ones after it run again.">Run again from here</button>';
     h += '</div>';
@@ -186,7 +239,7 @@ async function renderPanel() {
     panel.innerHTML = '<div id="head">' + headMarkup() + '</div><div id="body"></div>';
     const ready = ['complete', 'needs_review', 'unavailable'].includes(st.status);
     if (!ready && !(selected === 'review' && st.status !== 'blocked')) {
-        if (['processing', 'queued', 'blocked'].includes(st.status)) document.getElementById('body').innerHTML = '<div class="processing-state"><span class="processing-orbit" aria-hidden="true"></span><h3>' + (['probe', 'frames', 'correction'].includes(selected) ? 'Preparing the reference image' : 'Detecting buildings, paths and other features') + '</h3><p>This page updates automatically. You can leave and return from the flyover list.</p></div>';
+        if (['processing', 'queued', 'blocked'].includes(st.status)) document.getElementById('body').innerHTML = '<div class="processing-state"><span class="processing-orbit" aria-hidden="true"></span><h3>' + (['probe', 'frames', 'capture', 'correction'].includes(selected) ? 'Preparing the reference image' : 'Detecting buildings, paths and other features') + '</h3><p>This page updates automatically. You can leave and return from the flyover list.</p></div>';
         return;
     }
     try {
@@ -194,7 +247,7 @@ async function renderPanel() {
         results[selected] = data;
         const body = document.getElementById('body');
         if (!body) return;
-        await ({probe: viewProbe, frames: viewFrames, correction: viewCorrection, markers: viewMarkers, regions: viewRegions, classification: viewClassification, merging: viewMerging, geometry: viewGeometry, review: viewReview}[selected])(body, data);
+        await ({probe: viewProbe, frames: viewFrames, capture: viewCapture, correction: viewCorrection, markers: viewMarkers, regions: viewRegions, classification: viewClassification, merging: viewMerging, geometry: viewGeometry, review: viewReview}[selected])(body, data);
     } catch (e) {
         document.getElementById('body').innerHTML = '<div class="note err">' + esc(e.message) + '</div>';
     }
@@ -242,6 +295,35 @@ function viewFrames(body, data) {
     draw();
 }
 
+function viewCapture(body, data) {
+    if (!data.readiness) {
+        body.innerHTML = '<p>Capture checks were not run for this older flyover. Use “Run again from here” to check it; downstream results will be rebuilt.</p>';
+        return;
+    }
+    const images = data.images || [], usable = images.filter(i => !i.excluded).length;
+    const readiness = {ready: 'Ready for processing', needs_review: 'Review capture warnings', blocked: 'Multi-view reconstruction blocked'}[data.readiness];
+    body.innerHTML = '<h3>' + esc(readiness) + '</h3><ul>' + (data.reasons || []).map(r => '<li>' + esc(r) + '</li>').join('') + '</ul>'
+        + '<p>These checks run before map processing. '+(job.reconstruction?.enabled ? 'NodeODM photogrammetry is enabled for this flyover. These planar checks do not verify building-side coverage.' : 'Photogrammetry is off for this flyover.')+' Original uploads are preserved.</p>'
+        + (job.captureReview ? '<p class="note">Report acknowledged for 2D mapping at ' + esc(new Date(job.captureReview.at).toLocaleString()) + '.</p>' : data.readiness !== 'ready' ? '<p>Review the images below. You can start a new flyover with additional connecting or replacement photos, or acknowledge the limitations and continue with the current 2D pipeline.</p><button type="button" class="primary" id="continueCapture"' + (usable ? '' : ' disabled') + '>'+(job.reconstruction?.enabled ? 'Continue with photogrammetry' : 'Continue with 2D mapping')+'</button>' : '')
+        + '<p><button type="button" id="returnCapture">Return to workflow</button> <a class="button" href="/api/intake/jobs/' + job.id + '/stages/capture" download="capture-report.json">Download report JSON</a> <a class="button" href="/intake/">New flyover</a></p>'
+        + '<h3>Image quality and overlap</h3><p class="cap">Quality scores use a maximum analysis side of ' + data.settings.analysis_side + ' px. Sharpness threshold: ' + data.settings.sharpness_min + '; texture threshold: ' + data.settings.texture_min + '. Overlap target: ' + pct(data.settings.overlap_target) + '. Overlap is a planar footprint estimate, not a raw match count.</p>'
+        + '<div style="overflow:auto"><table><thead><tr><th>Image</th><th>Quality</th><th>Connections / best overlap</th><th>Flags / exclusions</th></tr></thead><tbody>' + images.map(i => '<tr><td><a href="' + fileUrl(i.image) + '" target="_blank" rel="noopener"><img loading="lazy" src="' + fileUrl(i.image) + '" alt="' + esc(i.source) + '" style="width:100px;max-height:80px;object-fit:contain"><br>' + esc(i.source) + '</a><br>' + esc(i.id) + '</td><td>Sharpness ' + i.metrics.sharpness + '<br>Texture ' + i.metrics.texture + '</td><td>' + i.connections + ' / ' + pct(i.best_overlap) + '</td><td>' + flags(i.flags, ['blur', 'connection', 'overlap']) + (i.excluded ? '<br><b>Excluded:</b> ' + esc(i.exclusion_reasons.join(', ')) : '') + '</td></tr>').join('') + '</tbody></table></div>'
+        + '<h3>Image connection groups</h3><p>' + esc(data.pair_search) + ' · ' + data.compared_pairs + ' pairs checked. A connection means distributed ORB matches passed geometric verification; it does not guarantee reconstruction.</p><ol>' + data.groups.map(group => '<li>' + group.map(esc).join(', ') + '</li>').join('') + '</ol>'
+        + '<h3>Estimated coverage</h3><p>Green: two or more image footprints. Amber: one view. Red: suspected enclosed gap. Dark: outside estimated footprints. Separate groups have unrelated coordinate frames. This preview cannot detect all missing outer strips or ground hidden by trees and buildings.</p>'
+        + data.coverage.map(group => '<section><h4>' + group.images.map(esc).join(', ') + ' · ' + esc(group.status) + '</h4>' + (group.image ? '<img src="' + fileUrl(group.image) + '" alt="Estimated image footprint coverage" style="max-width:100%;image-rendering:pixelated"><p>Single-view area: ' + pct(group.single_view_fraction) + ' · suspected enclosed gaps: ' + group.gaps.length + '</p><p class="cap">' + esc(group.scope) + '</p>' : '<p>' + esc(group.reason) + '</p>') + '</section>').join('')
+        + '<details><summary>Verified image pairs</summary><table><tr><th>Pair</th><th>Inliers</th><th>Overlap estimate</th></tr>' + data.links.filter(l => l.ok).map(l => '<tr><td>' + esc(l.from) + ' → ' + esc(l.to) + '</td><td>' + l.inliers + '</td><td>' + pct(l.overlap) + '</td></tr>').join('') + '</table></details>';
+    document.getElementById('returnCapture').onclick = () => { capturePinned = false; update(job); };
+    const button = document.getElementById('continueCapture');
+    if (button) button.onclick = async () => {
+        button.disabled = true;
+        try {
+            const next = await api('/api/intake/jobs/' + job.id + '/capture-review', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({action: job.reconstruction?.enabled ? 'continue-reconstruction' : 'continue-2d'})});
+            capturePinned = false;
+            update(next);
+        } catch (error) { button.disabled = false; alert(error.message); }
+    };
+}
+
 function viewCorrection(body, data) {
     let current = data.frames[0];
     const okLinks = data.links.filter(l => l.ok).length;
@@ -271,6 +353,20 @@ function calibrationChecks(r, tile) {
     if ([r.a, r.b].some(q => q[0] - x0 < m || x0 + w - q[0] < m || q[1] - y0 < m || y0 + h - q[1] < m)) out.push('reference end near the photo edge, where lens distortion is strongest');
     return out;
 }
+function measurementHeight(body) {
+    const field = document.createElement('p');
+    field.innerHTML = '<label>Height above ground (m) <input id="captureHeight" type="number" min="0.1" max="10000" step="any"></label>';
+    body.prepend(field);
+    const input = field.querySelector('input');
+    input.value = job.captureProfile?.height_agl_m ?? '';
+    let edited = false;
+    input.oninput = () => { edited = true; };
+    return () => {
+        if (!edited) return {};
+        if (!input.reportValidity() || !input.value) throw Error('Enter a height greater than zero.');
+        return {height_agl_m: Number(input.value)};
+    };
+}
 async function viewPerImage(body, data) {
     const images = data.images || [];
     const refs = JSON.parse(JSON.stringify((job.calibration?.references || []).filter(r => r.frame)));
@@ -283,6 +379,7 @@ async function viewPerImage(body, data) {
         + '<div class="split"><div id="mviewer"></div><div>'
         + '<div id="refForm" hidden class="card" style="margin-bottom:8px;padding:10px"><b id="refFor"></b><label>Distance between A and B <div class="row"><input id="refValue" type="number" min="0" step="any" style="width:110px"><select id="refUnit"><option value="ft">ft</option><option value="m">m</option><option value="in">in</option><option value="cm">cm</option></select></div></label><label>What is it? <input id="refLabel" placeholder="e.g. sidewalk width, tape measure" style="width:100%"></label><div class="row" style="margin-top:6px"><button type="button" class="primary" id="refAdd">Use this distance</button><button type="button" id="refCancel">Cancel</button></div></div>'
         + '<div class="row"><button type="button" class="primary" id="saveMarkers">Save scale &amp; continue</button></div><p id="mstatus" class="cap"></p><div class="list" id="mlist"></div></div></div>';
+    const height = measurementHeight(body);
     const v = viewer = createViewer(document.getElementById('mviewer'), {image: fileUrl(data.mosaic.image), width: data.mosaic.width, height: data.mosaic.height, hint: 'Zoom in before clicking. Drag the white handles to adjust a segment.'});
     const text = (x, y, t, k, anchor = 'start') => '<text x="' + x + '" y="' + y + '" font-size="' + 13 * k + '" text-anchor="' + anchor + '" fill="#fff" stroke="#000" stroke-width="' + 3 * k + '" paint-order="stroke">' + esc(t) + '</text>';
     const draw = () => {
@@ -364,7 +461,7 @@ async function viewPerImage(body, data) {
     };
     document.getElementById('saveMarkers').onclick = async () => {
         const note = t => { const el = document.getElementById('mstatus'); if (el) el.textContent = t; };
-        try { await api('/api/intake/jobs/' + job.id + '/calibration', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({markers: [], references: refs, markerSideM: job.calibration?.markerSideM || 0.3048})}); dirty = false; delete results.geometry; note('Scale saved. Building your map…'); }
+        try { await api('/api/intake/jobs/' + job.id + '/calibration', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({markers: [], references: refs, markerSideM: job.calibration?.markerSideM || 0.3048, ...height()})}); dirty = false; delete results.geometry; note('Scale saved. Building your map…'); }
         catch (e) { note(e.message); }
     };
     list();
@@ -377,6 +474,7 @@ async function viewMarkers(body, data) {
         + '<div class="split"><div id="mviewer"></div><div>'
         + '<label class="row">Known length <input id="lengthValue" type="number" min="0" step="any" style="width:100px"><select id="lengthUnit"><option value="ft">ft</option><option value="in">in</option><option value="m">m</option><option value="cm">cm</option></select></label>'
         + '<div class="row"><button type="button" id="redrawSegment">Redraw segment</button><button type="button" class="primary" id="saveMarkers">Save scale &amp; continue</button></div><p id="mstatus" class="cap"></p></div></div>';
+    const height = measurementHeight(body);
     const v = viewer = createViewer(document.getElementById('mviewer'), {image: fileUrl(data.mosaic.image), width: data.mosaic.width, height: data.mosaic.height, hint: 'Click two endpoints. Drag the handles to adjust the segment.'});
     const input = document.getElementById('lengthValue'), unit = document.getElementById('lengthUnit');
     if (reference) { unit.value = 'm'; input.value = reference.metres; }
@@ -397,13 +495,24 @@ async function viewMarkers(body, data) {
         if (!(metres > 0 && metres < 10000)) return note('Enter a known length greater than zero and less than 10,000 m.');
         reference = {id: 'D1', a: points[0], b: points[1], metres, confirmed: true};
         try {
-            await api('/api/intake/jobs/' + job.id + '/calibration', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({markers: [], references: [reference]})});
+            await api('/api/intake/jobs/' + job.id + '/calibration', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({markers: [], references: [reference], ...height()})});
             delete results.geometry;
             note('Scale saved. Building your map…');
         } catch (e) { note(e.message); }
     };
     draw();
     note(points.length === 2 ? 'Adjust the segment or its known length, then save.' : 'Click the first endpoint.');
+    mountMapReference(body, {job, mosaic:data.mosaic, fileUrl, save:async input=>{
+        const next=await api('/api/intake/jobs/'+job.id+'/map-reference', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(input)});
+        for(const stage of ['regions','classification','merging','geometry'])delete results[stage];
+        referencePinned=false;
+        update(next);
+    }});
+    mountReconstruction(body, {value:job.reconstruction, save:async config=>{
+        const next=await api('/api/intake/jobs/'+job.id+'/reconstruction',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(config)});
+        results={}; shown={}; referencePinned=false; update(next); renderPanel();
+    }});
+    if(referencePinned){const back=document.createElement('button');back.type='button';back.textContent='Return to workflow';back.onclick=()=>{referencePinned=false;update(job);renderPanel();};body.prepend(back);}
 }
 
 // ---- regions and classification (per keyframe)
@@ -461,7 +570,7 @@ async function viewMerging(body, data) {
         document.getElementById('glist').innerHTML = data.merged.map(g => '<div data-pick="' + g.id + '" aria-selected="' + (g.id === active) + '"><b>' + g.id + '</b> ' + esc(label(g.kind).label) + (g.confidence != null ? ' · ' + pct(g.confidence) : '') + '<br><span class="cap">' + g.members.length + ' detections · ' + g.frames.length + ' frames' + (g.mean_iou != null ? ' · mean IoU ' + g.mean_iou : '') + '</span><br>' + flags(g.flags, ['conflicting', 'geometry'])).join('');
         draw();
     };
-    document.getElementById('glist').onclick = e => { const p = e.target.closest('[data-pick]'); if (!p) return; active = p.dataset.pick; const g = data.merged.find(x => x.id === active); const xs = g.polygon.map(q => q[0]), ys = g.polygon.map(q => q[1]); v.focus(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys), 2); list(); };
+    document.getElementById('glist').onclick = e => { const p = e.target.closest('[data-pick]'); if (!p) return; active = p.dataset.pick; const g = data.merged.find(x => x.id === active); const xs = g.polygon.map(q => q[0]), ys = g.polygon.map(q => q[1]); v.focus(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys), 2.5, v.contextSize(data.scale?.m_per_px > 0 ? 25 / data.scale.m_per_px : 0)); list(); };
     v.onClick = (p, target) => { const hit = target.closest?.('[data-g]'); if (hit) { active = hit.dataset.g; list(); } };
     list();
 }
@@ -531,10 +640,10 @@ async function viewReview(body, payload) {
     const staged = job.sceneMode === 'stitched', phase = staged ? payload.review?.phase || 'zones' : 'ready';
     let outline = [];
     let marks = [], clickMode = 'select', shadows = false, busy = false, submitting = false;
-    const visible = f => phase === 'zones' ? f.kind !== 'grass' && (f.geometry !== 'point' || f.kind === 'tree') : phase === 'points' ? ['tree', 'bench', 'light'].includes(f.kind) : phase === 'access' ? ['entrance', 'path'].includes(f.kind) : true;
-    const title = {zones: '1 · Review zones and trees', points: '2 · Review benches and lights', access: '3 · Confirm entrances and NPC access', ready: 'Ready to import'}[phase];
-    const options = phase === 'zones' ? ['select', 'building', 'path', 'tree', 'shadow'] : phase === 'points' ? ['select', 'tree', 'bench', 'light', 'remove'] : phase === 'access' ? ['select', 'entrance'] : ['select'];
-    const toolbar = staged ? '<h3>' + title + '</h3><p>' + ({zones: 'Start with rough guidance: drag a general path line, or click building corners and choose Finish outline. Reevaluate to let the model fit visible boundaries; sketches are suggestions, not final answers. Accept the resulting proposals when correct. Use trees and shade to explain hidden path sections.', points: 'Outline one representative bench and one light post: choose the category, click around the object, then Finish outline. SAM 3 uses these examples to search for similar objects when enabled. Reevaluate and review the proposals. Remove dot suppresses an incorrect detection.', access: 'NPC spawn and leave points are only required at scene-edge path ends. Paths ending within 5% of the map boundary extend to the edge. Building entrances are optional. Click the actual door on an accepted building outline. Nearby path ends join it; red circles show optional interior connections. Select a path to drag its end to the correct entrance or scene edge.', ready: 'Zone, point and access review are complete.'}[phase]) + '</p>'
+    const visible = f => phase === 'zones' ? f.kind !== 'grass' && (f.geometry !== 'point' || f.kind === 'tree') : phase === 'points' ? ['tree', 'bush', 'bench', 'light'].includes(f.kind) : phase === 'access' ? ['entrance', 'path'].includes(f.kind) : true;
+    const title = {zones: '1 · Review zones and trees', points: '2 · Review bushes, benches and lights', access: '3 · Confirm entrances and NPC access', ready: 'Ready to import'}[phase];
+    const options = phase === 'zones' ? ['select', 'building', 'path', 'tree', 'shadow'] : phase === 'points' ? ['select', 'tree', 'bush', 'bench', 'light', 'remove'] : phase === 'access' ? ['select', 'entrance'] : ['select'];
+    const toolbar = staged ? '<h3>' + title + '</h3><p>' + ({zones: 'Start with rough guidance: drag a general path line, or click building corners and choose Finish outline. Reevaluate to let the model fit visible boundaries; sketches are suggestions, not final answers. Accept the resulting proposals when correct. Use trees and shade to explain hidden path sections.', points: 'Trees require a visible canopy; vegetation without one is a bush. Outline a representative bush, bench or light post: choose the category, click around the object, then Finish outline. SAM 3 uses these examples to search for similar objects when enabled. Reevaluate and review the proposals. Remove dot suppresses an incorrect detection.', access: 'NPC spawn and leave points are only required at scene-edge path ends. Paths ending within 5% of the map boundary extend to the edge. Building entrances are optional. Click the actual door on an accepted building outline. Nearby path ends join it; red circles show optional interior connections. Select a path to drag its end to the correct entrance or scene edge.', ready: 'Zone, point and access review are complete.'}[phase]) + '</p>'
         + (geometry.pointDetection && phase === 'points' ? '<p class="note">' + esc(geometry.pointDetection) + '</p>' : '')
         + '<div class="row"><label>Action <select id="clickMode">' + options.map(k => '<option value="' + k + '">' + ({select: 'Select / edit', shadow: 'This is shadow', remove: 'Remove dot', entrance: 'Mark building entrance'}[k] || 'This is ' + label(k).label) + '</option>').join('') + '</select></label><label><input type="checkbox" id="showShadows"> Show candidate shadows</label>'
         + (['zones', 'points'].includes(phase) ? '<button type="button" id="finishOutline">Finish outline</button><label>Search corridor size <input id="brushSize" type="range" min="8" max="100" value="32"></label>' : '')
@@ -553,9 +662,9 @@ async function viewReview(body, payload) {
         + '<nav class="review-tabs" aria-label="Review panels"><button type="button" data-review-tab="review" aria-pressed="true">Review</button><button type="button" data-review-tab="features" aria-pressed="false">Justify</button><button type="button" data-review-tab="export" aria-pressed="false">Export</button></nav>'
         + '<section data-review-panel="review"><div class="note warn">Only accepted features are imported. Amber dashed outlines are pending; solid outlines are accepted.</div>' + toolbar
         + '<p>Review each feature in Justify. Choose Yes to accept it or No to reject it and continue.</p><p id="reviewCounts" class="cap"></p></section>'
-        + '<section data-review-panel="features" hidden><h2>Feature properties</h2><p class="review-help">Is this feature correct? Review its properties, then choose Yes or No to submit and continue.</p><button type="button" id="acceptAll">Accept all</button><div class="review-table"><table><tbody id="rows"></tbody></table></div></section>'
+        + '<section data-review-panel="features" hidden><h2>Feature properties</h2><p class="review-help">Is this feature correct? Review its properties, then choose Yes or No to submit and continue.</p><button type="button" id="acceptAll">Accept all</button><div class="review-table"><table><tbody id="rows"></tbody></table></div><h3 class="review-list-title">Still to review <span class="cap" id="reviewListCount"></span></h3><p class="review-help">Pick any feature to jump to it on the map.</p><div class="review-list" id="reviewList" role="list"></div></section>'
         + '<section data-review-panel="export" hidden><h2>Export</h2><div class="export"><section id="exportScenario"></section><section id="export3d"></section></div></section></div></aside></section>';
-    const v = viewer = mapView(document.getElementById('rmap'), geometry, () => features().filter(f => reviewPanel !== 'features' || f.id === active), {editable: phase !== 'ready' || !staged, active: () => active, shadows: () => shadows,
+    const v = viewer = mapView(document.getElementById('rmap'), geometry, () => features().filter(f => reviewPanel !== 'features' || f.id === active || (visible(f) && f.status === 'proposed')), {editable: phase !== 'ready' || !staged, active: () => active, shadows: () => shadows,
         overlay: (toPx, k) => {
             let markup = outline.length ? '<polyline points="' + pts(outline.map(toPx)) + '" fill="none" stroke="#fff" stroke-width="2" vector-effect="non-scaling-stroke"/>' : '';
             for (const m of marks) { if (m.outline) { markup += '<polygon points="' + pts(m.outline.map(toPx)) + '" fill="none" stroke="' + label(m.kind).color + '" stroke-width="2" vector-effect="non-scaling-stroke"/>'; continue; } if (m.stroke) { markup += '<polyline points="' + pts(m.stroke.map(toPx)) + '" fill="none" stroke="' + (m.kind === 'shadow' ? '#bc67cf' : label(m.kind).color) + '" stroke-width="' + (2 * m.radius / geometry.scale.m_per_px) + '" stroke-linecap="round" stroke-linejoin="round" opacity=".6" pointer-events="none"/>'; continue; } const q = toPx(m.p); markup += '<circle cx="' + q[0] + '" cy="' + q[1] + '" r="' + 6 * k + '" fill="' + (m.kind === 'shadow' ? '#bc67cf' : label(m.kind).color) + '" stroke="#fff" stroke-width="2" vector-effect="non-scaling-stroke" pointer-events="none"/>'; }
@@ -590,6 +699,8 @@ async function viewReview(body, payload) {
         document.getElementById('rstatus').textContent = submitting ? 'Submitting decision…' : next ? 'Review ' + next.name + ' · ' + pending.length + ' remaining' : 'All features in this step have been reviewed.';
         if (submitting) body.querySelectorAll('[data-edit], [data-status]').forEach(el => { el.disabled = true; });
         const list = features().filter(visible);
+        document.getElementById('reviewListCount').textContent = pending.length ? pending.length + ' left' : '';
+        document.getElementById('reviewList').innerHTML = pending.map(f => '<button type="button" role="listitem" data-feature="' + esc(f.id) + '" aria-current="' + (f.id === active) + '"><i style="background:' + label(f.kind).color + '"></i><span><b>' + esc(f.name) + '</b><small>' + esc(f.id) + ' · ' + esc(label(f.kind).label) + ' · ' + (f.size.area_m2 != null ? '≈ ' + f.size.area_m2 + ' m²' : f.size.length_m != null ? '≈ ' + f.size.length_m + ' m' : 'point') + (f.confidence != null ? ' · ' + pct(f.confidence) : '') + '</small></span></button>').join('') || '<p class="cap">Nothing left in this step.</p>';
         document.getElementById('reviewCounts').textContent = list.filter(f => f.status === 'accepted').length + ' accepted · ' + list.filter(f => f.status === 'proposed').length + ' pending · ' + list.filter(f => f.status === 'rejected').length + ' rejected';
         if (staged && phase === 'ready') body.querySelectorAll('[data-edit], [data-status], #acceptLabelled').forEach(el => { el.disabled = true; });
         if (document.getElementById('markCount')) document.getElementById('markCount').textContent = marks.length + ' correction(s)';
@@ -625,13 +736,13 @@ async function viewReview(body, payload) {
             const sum = await api('/api/intake/jobs/' + job.id + '/model-summary');
             if (!panel.isConnected) return;
             panel.innerHTML = '<small class="cap">3D model export</small><h3>glTF binary (.glb), metres, ' + esc(sum.label.toLowerCase()) + '</h3>'
-                + '<div class="note warn"><b>Elevation: flat at 0 m.</b> ' + esc(sum.elevation.reason) + ' This is not a 3D reconstruction.</div>'
-                + '<div class="note off"><b>Contours: unavailable.</b> ' + esc(sum.contours.reason) + '</div>'
+                + '<div class="note warn"><b>Elevation: ' + (sum.elevation.status === 'terrain' ? 'supplied ground terrain.' : 'flat at 0 m.') + '</b> ' + esc(sum.elevation.reason) + '</div>'
+                + '<div class="note"><b>Contours: ' + (sum.contours.available ? 'available (' + sum.contours.interval_m + ' m interval).' : 'unavailable.') + '</b> ' + esc(sum.contours.reason) + '</div>'
                 + '<table><tr><th>Feature</th><th>Exported as</th><th>Height</th></tr>' + sum.features.map(f => '<tr><td>' + esc(f.name) + ' <span class="cap">' + f.kind + '</span></td><td>' + esc(f.shape) + '</td><td>' + (f.height ? f.height + ' m <span class="flag">' + esc(f.heightSource) + '</span>' : '—') + '</td></tr>').join('') + '</table>'
                 + '<p><a class="button primary" href="/api/intake/jobs/' + job.id + '/model.glb">Download .glb</a></p>';
         } catch (e) { panel.innerHTML = '<div class="note err">' + esc(e.message) + '</div>'; }
     }
-    const focusFeature = id => { const f = features().find(x => x.id === id); const p = f.p.map(v.toPx); const xs = p.map(q => q[0]), ys = p.map(q => q[1]); v.ensureVisible(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)); };
+    const focusFeature = id => { const f = features().find(x => x.id === id); const p = f.p.map(v.toPx); const xs = p.map(q => q[0]), ys = p.map(q => q[1]); v.focus(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys), 2.5, v.contextSize(25 / geometry.scale.m_per_px)); };
     body.addEventListener('change', e => {
         if (busy || submitting) return;
         if (e.target.id === 'clickMode') { v.panOnly = false; body.querySelector('[data-map="pan"]').setAttribute('aria-pressed', 'false'); body.querySelector('[data-map="select"]').setAttribute('aria-pressed', 'true'); outline = []; clickMode = e.target.value; active = null; refresh(); return; }
@@ -720,7 +831,7 @@ async function viewReview(body, payload) {
     v.onClick = (p, target) => {
         if (busy || submitting || v.panOnly) return;
         if (clickMode === 'entrance') { action('entrance', {p: v.toM(p)}); return; }
-        if (['building', 'bench', 'light'].includes(clickMode)) { outline.push(v.toM(p)); refresh(); return; }
+        if (['building', 'bush', 'bench', 'light'].includes(clickMode)) { outline.push(v.toM(p)); refresh(); return; }
         if (clickMode !== 'select') { if (p[0] >= 0 && p[1] >= 0 && p[0] < geometry.mosaic.width && p[1] < geometry.mosaic.height) { marks.push({kind: clickMode, p: v.toM(p).map(x => +x.toFixed(3)), guide: true}); refresh(); } return; }
         const hit = target.closest?.('[data-f]'); if (hit && features().some(f => f.id === hit.dataset.f && visible(f))) { active = hit.dataset.f; showReviewPanel('features'); refresh(); document.querySelector('[data-row="' + active + '"]')?.scrollIntoView({block: 'nearest'}); }
     };

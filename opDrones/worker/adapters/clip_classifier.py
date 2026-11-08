@@ -23,27 +23,34 @@ stdin; print {"model": {...}, "predictions": [{"id", "label", "confidence"}]}.
 import json
 import os
 import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+from capture_profile import DEFAULT_PROFILE, capture_profile, prompt_templates
 
 # The only erfMap kinds this classifier assigns. Every region gets the closest
 # of these; nothing is left out. Edit this to change the set.
 PROMPTS = {
     'building': ['a building roof', 'a rooftop', 'a house roof'],
     'grass': ['a lawn', 'mowed grass', 'a grassy field'],
-    'tree': ['a tree', 'a tree crown', 'bare tree branches'],
+    'tree': ['a tree with a visible canopy', 'a tree crown', 'a leafy tree canopy'],
     'path': ['a concrete sidewalk', 'a footpath', 'a paved walkway'],
     'road': ['an asphalt road', 'a parking lot', 'an asphalt driveway'],
     'light': ['a lamp post', 'a street light seen from above'],
+    'bush': ['a bush', 'a shrub without a tree canopy', 'bare woody vegetation without a canopy'],
     'bench': ['a park bench', 'a bench'],
 }
 # Most of a site is grass, path or road, so those start more likely. Buildings,
 # trees, lamp posts and benches sit on top of them.
 PRIOR = {'grass': 3.0, 'path': 3.0, 'road': 3.0}
-TEMPLATES = ['an aerial photo of {}.', 'a top-down drone photo of {}.']
+TEMPLATES = prompt_templates(DEFAULT_PROFILE)
 MIN_SIDE = 4        # px; anything smaller has no pixels to compare
 
 
 def main():
     request = json.load(sys.stdin)
+    profile = capture_profile(request.get('captureProfile'))
+    templates = prompt_templates(profile)
     import numpy as np
     import open_clip
     import torch
@@ -67,7 +74,7 @@ def main():
     # One averaged text embedding per kind.
     text = []
     for kind in classes:
-        phrases = [t.format(p) for p in prompts[kind] for t in TEMPLATES]
+        phrases = [t.format(p) for p in prompts[kind] for t in templates]
         e = model.encode_text(tokenizer(phrases))
         e = e / e.norm(dim=-1, keepdim=True)
         e = e.mean(dim=0)
@@ -112,7 +119,8 @@ def main():
             flush()
     flush()
     json.dump({'model': {'name': 'CLIP zero-shot ' + name, 'version': weights or 'untrained',
-                         'note': 'General-purpose image model compared with text prompts; not trained on drone surveys.'},
+                         'captureProfile': profile,
+                         'note': 'General-purpose image model with capture-height text context; not evidence of training at that height. Scale still requires a measured ground reference.'},
                'predictions': predictions}, sys.stdout)
 
 

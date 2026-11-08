@@ -85,7 +85,7 @@ class ZonesTest(unittest.TestCase):
         self.assertAlmostEqual(paths[0]['width'], 80, delta=12)
 
     def test_zones_do_not_overlap(self):
-        masks = [(r['model_label'], raster(r['polygon'], trim=True)) for r in self.zones]
+        masks = [(r['model_label'], raster(r['polygon'], trim=True)) for r in self.zones if r['model_label'] != 'grass']
         for i, (a, ma) in enumerate(masks):
             for b, mb in masks[i + 1:]:
                 overlap = (ma & mb).sum()
@@ -109,20 +109,23 @@ class ZonesTest(unittest.TestCase):
         self.assertGreater(max(x for x, _ in pts), 0.4 * SIZE[0])
         self.assertTrue(any(inside(r['polygon'], 900, 830) for r in self.of('path')))
 
-    def test_path_divides_lawn(self):
+    def test_one_background_covers_both_sides_of_path(self):
         grass = self.of('grass')
         left = [i for i, r in enumerate(grass) if inside(r['polygon'], 300, 300)]
         right = [i for i, r in enumerate(grass) if inside(r['polygon'], 1000, 300)]
         self.assertEqual(len(left), 1)
         self.assertEqual(len(right), 1)
-        self.assertNotEqual(left, right)
+        self.assertEqual(left, right)
+        self.assertEqual(len(grass), 1)
+        self.assertEqual(grass[0]['polygon'], [[0, 0], [SIZE[0], 0], list(SIZE), [0, SIZE[1]]])
+        self.assertEqual(grass[0]['source'], 'default-background')
         self.assertTrue(any(inside(r['polygon'], 1000, 1450) for r in grass))   # lawn below the road too
 
-    def test_grass_keeps_hole_around_building(self):
+    def test_grass_background_underlies_building(self):
         lawn = next(r for r in self.of('grass') if inside(r['polygon'], 1000, 300))
-        self.assertFalse(inside(lawn['polygon'], 1400, 400))           # building centre
+        self.assertTrue(inside(lawn['polygon'], 1400, 400))
         self.assertTrue(inside(self.of('building')[0]['polygon'], 1400, 400))
-        self.assertLess((raster(lawn['polygon'], trim=True) & raster(self.of('building')[0]['polygon'], trim=True)).sum(), 50)
+        self.assertGreater((raster(lawn['polygon'], trim=True) & raster(self.of('building')[0]['polygon'], trim=True)).sum(), 50)
 
     def test_point_on_grass_leaves_zone_intact(self):
         tree = self.points[0]
@@ -322,10 +325,10 @@ class PathJoinTest(unittest.TestCase):
         spanning = [l for l in lines if l[:, 1].min() < 300 and l[:, 1].max() > 700 and np.all(np.abs(l[:, 0] - 640) < 15)]
         self.assertTrue(spanning, 'one line runs through the shade: %s' % [l.tolist() for l in lines])
         grass_there = [r for r in regions if r.get('model_label') == 'grass' and inside(r['polygon'], 640, 500)]
-        self.assertFalse(grass_there, 'the gap is path, not grass')
+        self.assertEqual(len(grass_there), 1, 'the grass background underlies the joined path')
         left = [r for r in regions if r.get('model_label') == 'grass' and inside(r['polygon'], 300, 300)]
         right = [r for r in regions if r.get('model_label') == 'grass' and inside(r['polygon'], 1000, 300)]
-        self.assertNotEqual(left[0]['polygon'], right[0]['polygon'], 'the joined path still divides the lawn')
+        self.assertEqual(left[0]['polygon'], right[0]['polygon'], 'one background spans the whole map')
 
     def test_a_path_broken_by_canopy_is_joined(self):
         def canopy(image, probs):
@@ -358,12 +361,51 @@ class PathJoinTest(unittest.TestCase):
         out, _, _ = cz.connect_paths(lines, [20, 20], np.zeros((600, 800), bool), (600, 800))
         self.assertEqual(len(out), 1)
 
+    def test_broad_fragmented_path_becomes_one_thick_best_fit_line(self):
+        mask = np.zeros((600, 800), bool)
+        for start, end in ((60, 230), (370, 540), (680, 790)):
+            mask[260:340, start:end] = True
+        paths, filled = cz.path_lines(mask, np.zeros_like(mask), 1, (800, 600), 1)
+        self.assertEqual(len(paths), 1)
+        line = np.asarray(paths[0]['line'])
+        self.assertEqual(len(line), 2, 'detection gaps should not leave extra line segments')
+        self.assertLessEqual(line[:, 0].min(), 62)
+        self.assertGreaterEqual(line[:, 0].max(), 788)
+        self.assertTrue(np.all(np.abs(line[:, 1] - 300) <= 2))
+        self.assertAlmostEqual(paths[0]['width'], 80, delta=3)
+        self.assertTrue(filled[275:325, 230:370].all(), 'bridge retains the broad path diameter')
+
+    def test_parallel_corridors_do_not_join_diagonally(self):
+        lines = [np.array([[60., 250.], [240., 250.]]), np.array([[420., 335.], [700., 335.]])]
+        out, _, bridges = cz.connect_paths(lines, [80, 80], np.zeros((600, 800), bool), (600, 800))
+        self.assertEqual(len(out), 2)
+        self.assertEqual(bridges, [])
+
+    def test_ragged_edges_do_not_shatter_a_broad_corridor(self):
+        mask = np.zeros((600, 800), bool)
+        mask[260:340, 40:760] = True
+        for x in range(70, 740, 32):
+            mask[230:370, x:x + 8] = True
+        lines, width = cz.centre_lines(mask, mask.shape)
+        self.assertEqual(len(lines), 1)
+        self.assertLessEqual(len(lines[0]), 3)
+        self.assertTrue(np.all(np.abs(lines[0][:, 1] - 300) < 8))
+        self.assertAlmostEqual(width, 80, delta=12)
+
+    def test_even_a_thin_building_blocks_a_broad_bridge(self):
+        lines = [np.array([[60., 300.], [230., 300.]]), np.array([[370., 300.], [700., 300.]])]
+        blocked = np.zeros((600, 800), bool)
+        blocked[290:310, 298:302] = True
+        out, _, bridges = cz.connect_paths(lines, [80, 80], blocked, (600, 800))
+        self.assertEqual(len(out), 2)
+        self.assertEqual(bridges, [])
+
 
 class CouncilTest(unittest.TestCase):
     def test_label_names_map_onto_our_classes(self):
         ids = cz.map_labels({0: 'wall', 1: 'building, edifice', 2: 'sidewalk, pavement', 3: 'grass', 4: 'tree', 5: 'sky', 6: 'road, route', 7: 'impervious surfaces'}, cz.SYNONYMS)
         self.assertEqual(ids, {'building': [1], 'road': [6, 7], 'path': [2], 'grass': [3], 'tree': [4]})
-        self.assertEqual(cz.map_labels({9: 'bench', 10: 'streetlight, street lamp'}, cz.POINT_SYNONYMS), {'light': [10], 'bench': [9]})
+        self.assertEqual(cz.map_labels({9: 'bench', 10: 'streetlight, street lamp'}, cz.POINT_SYNONYMS), {'bush': [], 'light': [10], 'bench': [9]})
 
     def test_votes_are_weighted_and_silent_members_do_not_count(self):
         a = np.zeros((1, 2, 5), np.float32); a[..., cz.CLASSES.index('grass')] = 1
@@ -376,10 +418,47 @@ class CouncilTest(unittest.TestCase):
         image, probs = scene()
         crowns = [(500.0, 200.0, 0.9, 30.0), (150.0, 300.0, 0.7, 40.0), (500.0, 640.0, 0.95, 20.0)]
         pulled = cz.add_tree_crowns(probs, crowns)
-        self.assertGreater(pulled[200, 500, cz.CLASSES.index('tree')], probs[200, 500, cz.CLASSES.index('tree')] + 0.4)
+        self.assertEqual(pulled[200, 500, cz.CLASSES.index('tree')], probs[200, 500, cz.CLASSES.index('tree')], 'clear lawn vetoes a false detector box')
+        self.assertGreater(pulled[300, 150, cz.CLASSES.index('tree')], probs[300, 150, cz.CLASSES.index('tree')])
         trees = [r for r in cz.build_zones(image, pulled, SIZE, trees=crowns) if r['label'] == 'tree']
-        self.assertEqual([t['point'] for t in trees], [[1000.0, 400.0], [300.0, 600.0]])
-        self.assertEqual([t['confidence'] for t in trees], [0.9, 0.7])
+        self.assertEqual([t['point'] for t in trees], [[300.0, 600.0]])
+        self.assertEqual([t['confidence'] for t in trees], [0.7])
+
+    def test_segformer_keeps_grass_evidence_to_compete_with_trees(self):
+        from PIL import Image
+        member = cz.SegFormer.__new__(cz.SegFormer)
+        member.zone_ids = {k: [i] for i, k in enumerate(cz.CLASSES)}
+        member.point_ids = {}
+        raw = np.zeros((1, 2, len(cz.CLASSES)), np.float32)
+        raw[0, 0, cz.CLASSES.index('grass')] = .9
+        raw[0, 0, cz.CLASSES.index('tree')] = .1
+        raw[0, 1, cz.CLASSES.index('tree')] = .9
+        raw[0, 1, cz.CLASSES.index('grass')] = .1
+        member.probabilities = lambda image, groups=None: raw
+        probs, mass = member.zones(Image.new('RGB', (2, 1)))
+        np.testing.assert_allclose(probs, raw)
+        np.testing.assert_allclose(mass, 1)
+
+    def test_grass_background_does_not_depend_on_grass_scores(self):
+        image, probs = scene()
+        probs[:, :, cz.CLASSES.index('grass')] = 0
+        regions = cz.build_zones(image, probs, SIZE)
+        lawns = [r for r in regions if r['label'] == 'grass']
+        self.assertEqual(len(lawns), 1)
+        self.assertEqual(lawns[0]['polygon'], [[0, 0], [SIZE[0], 0], list(SIZE), [0, SIZE[1]]])
+
+    def test_detector_does_not_hide_a_second_semantic_tree(self):
+        image, probs = scene()
+        cv2.circle(image, (500, 200), 50, (30, 80, 30), -1)
+        rng = np.random.default_rng(7)
+        image[155:245, 455:545] = np.clip(image[155:245, 455:545].astype(int) + rng.integers(-12, 13, (90, 90, 3)), 0, 255)
+        yy, xx = np.ogrid[:H, :W]
+        mask = (xx-500)**2 + (yy-200)**2 <= 50**2
+        probs[mask] = .06
+        probs[mask, cz.CLASSES.index('tree')] = .76
+        trees = [r for r in cz.build_zones(image, probs, SIZE, trees=[(150, 300, .9, 40)]) if r['label'] == 'tree']
+        self.assertEqual(len(trees), 2)
+        self.assertTrue(any(np.hypot(r['point'][0]-1000, r['point'][1]-400) < 40 for r in trees))
 
     def test_empty_detector_uses_semantic_crowns(self):
         image, probs = scene()

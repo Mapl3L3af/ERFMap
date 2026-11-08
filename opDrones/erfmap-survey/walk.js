@@ -56,10 +56,15 @@ const walk = (() => {
         const ctx=tex.getContext('2d');ctx.scale(1024/site.w,1024/site.h);
         ctx.fillStyle=style==='realistic'?'#92957b':'#b3c97c';ctx.fillRect(0,0,site.w,site.h);
         const groundFeatures=site.features.filter(f=>(kinds[f.kind][2]==='area'&&f.kind!=='building')||['path','crossing'].includes(f.kind));
-        for(const f of groundFeatures.sort((a,b)=>Number(kinds[a.kind][2]!=='area')-Number(kinds[b.kind][2]!=='area'))){
+        const groundRank=f=>f.kind==='grass'?-1:Number(kinds[f.kind][2]!=='area');
+        for(const f of groundFeatures.sort((a,b)=>groundRank(a)-groundRank(b))){
             ctx.beginPath();f.p.forEach(([x,y],i)=>i?ctx.lineTo(x,y):ctx.moveTo(x,y));
             if(kinds[f.kind][2]==='area'){ctx.closePath();ctx.fillStyle=featureColor(f);ctx.fill();}
-            else{ctx.strokeStyle=featureColor(f);ctx.lineWidth=Math.max(1.1,Number(f.tagProperties?.width||1.55));ctx.lineJoin='round';ctx.stroke();}
+            else{
+                ctx.strokeStyle=featureColor(f);ctx.lineJoin='round';ctx.lineCap='round';
+                const widths=featureSegmentWidths(f,1.55);
+                for(let j=0;j<widths.length;j++){ctx.beginPath();ctx.moveTo(...f.p[j]);ctx.lineTo(...f.p[j+1]);ctx.lineWidth=Math.max(.2,widths[j]);ctx.stroke();}
+            }
         }
         // Sparse ink marks and soft contact shadows on the illustrated ground.
         const noise=i=>{const v=Math.sin(i*78.233+19.7)*43758.5453;return v-Math.floor(v);};
@@ -81,12 +86,12 @@ const walk = (() => {
         }
         gl.bindTexture(gl.TEXTURE_2D,texture);gl.texImage2D(gl.TEXTURE_2D,0,gl.RGB,gl.RGB,gl.UNSIGNED_BYTE,tex);
         gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MAG_FILTER,style==='realistic'?gl.LINEAR:gl.NEAREST);gl.texParameteri(gl.TEXTURE_2D,gl.TEXTURE_MIN_FILTER,gl.LINEAR);
-        const mesh=elevationMesh(site),steps=mesh.steps,grid=mesh.grid;
-        surface=mesh.at;
-        for(let y=0;y<steps;y++)for(let x=0;x<steps;x++){
-            const a=grid[y][x],b=grid[y][x+1],c=grid[y+1][x+1],d=grid[y+1][x];
-            const shade=Math.max(.73,Math.min(1.04,.93+(b[2]-a[2])/(site.w/steps)*.28));
-            face([a,b,c],'#ffffff',shade,1);face([a,c,d],'#ffffff',shade*.985,1);
+        const mesh=elevationMesh(site);
+        surface=p=>mesh.at(p) ?? 0;
+        for(const triangle of mesh.faces){
+            const [a,b]=triangle,run=Math.hypot(b[0]-a[0],b[1]-a[1])||1;
+            const shade=Math.max(.73,Math.min(1.04,.93+(b[2]-a[2])/run*.28));
+            face(triangle,'#ffffff',shade,1);
         }
         // Chunky cloud banks make the skyline readable while turning.
         const span=Math.hypot(site.w,site.h);

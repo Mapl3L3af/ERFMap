@@ -3,7 +3,12 @@
 const elevationMeshes = new WeakMap();
 function elevationMesh(site) {
     const cached=elevationMeshes.get(site);
-    if(cached && cached.samples===site.samples && cached.w===site.w && cached.h===site.h)return cached;
+    if(cached && cached.samples===site.samples && cached.w===site.w && cached.h===site.h && cached.groundGrid===site.groundGrid)return cached;
+    if(site.groundGrid){
+        const g=site.groundGrid,faces=groundGridFaces(g),heights=g.heights.flat().filter(z=>z!==null);
+        const mesh={samples:site.samples,groundGrid:site.groundGrid,w:site.w,h:site.h,faces,at:p=>groundGridHeight(g,...p),min:Math.min(...heights),max:Math.max(...heights)};
+        elevationMeshes.set(site,mesh);return mesh;
+    }
     const steps=48, grid=[];
     for(let y=0;y<=steps;y++){
         grid[y]=[];
@@ -29,17 +34,21 @@ function elevationMesh(site) {
     elevationMeshes.set(site,mesh);return mesh;
 }
 function contourSegments(site,interval) {
+    const mesh=elevationMesh(site);
+    if(!Number.isFinite(interval)||interval<=0||(mesh.max-mesh.min)/interval>200)throw Error('Choose a contour interval with at most 200 elevation levels.');
     const segments=[];
     for(const triangle of elevationMesh(site).faces){
         const low=Math.min(...triangle.map(p=>p[2])),high=Math.max(...triangle.map(p=>p[2]));
-        for(let height=Math.ceil(low/interval)*interval;height<high;height+=interval){
+        for(let level=Math.ceil(low/interval);level<Math.ceil(high/interval);level++){
+            const height=level*interval;
             const points=[];
             for(const [a,b] of edges(triangle,true)){
                 if((a[2]<=height&&b[2]>height)||(b[2]<=height&&a[2]>height)){
                     const t=(height-a[2])/(b[2]-a[2]);points.push([a[0]+t*(b[0]-a[0]),a[1]+t*(b[1]-a[1])]);
                 }
             }
-            if(points.length===2)segments.push({height,points});
+            if(points.length===2 && dist(...points)>1e-9)segments.push({height,points});
+            if(segments.length>100000)throw Error('Too many contour segments. Increase the interval.');
         }
     }
     return segments;
@@ -49,7 +58,7 @@ function contourInterval(site) {
     return range<=5?.5:range<=20?1:10**Math.floor(Math.log10(range/10));
 }
 function scenarioContours(site) {
-    return site.contours ?? (site.samples.length ? contourSegments(site,contourInterval(site)) : []);
+    return site.contourInterval ? contourSegments(site,site.contourInterval) : site.contours ?? (site.samples.length ? contourSegments(site,contourInterval(site)) : []);
 }
 function terrainProfile(site,a,b) {
     const mesh=elevationMesh(site),distance=dist(a,b),samples=[];
@@ -58,6 +67,7 @@ function terrainProfile(site,a,b) {
         const z=mesh.at(a.map((v,k)=>v+(b[k]-v)*i/100));samples.push(z);
         if(i){const d=z-samples[i-1];rise+=Math.max(0,d);fall+=Math.max(0,-d);}
     }
+    if(samples.some(z=>z===null))return {samples,distance,incomplete:true};
     return {samples,distance,rise,fall,change:samples.at(-1)-samples[0],grade:distance?(samples.at(-1)-samples[0])/distance*100:0};
 }
 let profilePoints=[],contours=true,contourCache=new WeakMap();
@@ -75,7 +85,7 @@ function elevationPlan(showProfile=false) {
         }
     }
     if(!showProfile)return output;
-    profilePoints.forEach((p,i)=>{output+=circle(project(p),5,'#fff','#233c4e')+label([project(p)[0],project(p)[1]-10],(i?'B':'A')+' · '+mesh.at(p).toFixed(2)+' m');});
+    profilePoints.forEach((p,i)=>{output+=circle(project(p),5,'#fff','#233c4e')+label([project(p)[0],project(p)[1]-10],(i?'B':'A')+' · '+(mesh.at(p)===null?'No ground data':mesh.at(p).toFixed(2)+' m'));});
     if(profilePoints.length===2)output+=line(profilePoints.map(project),'#233c4e',2,'stroke-dasharray="5 4" pointer-events="none"');
     return output;
 }
@@ -84,9 +94,11 @@ function elevationControls(){
     let h='';
     if(view3)return h+'<p class="note">Return to the plan to measure a terrain profile.</p>';
     h+='<h3>Elevation profile</h3><p>Click A and B on the plan. A third click starts a new profile.</p>';
-    if(profilePoints.length===1)h+='<p class="note">A · '+elevationMesh(site).at(profilePoints[0]).toFixed(2)+' m. Choose B.</p>';
+    if(profilePoints.length===1)h+='<p class="note">A · '+(elevationMesh(site).at(profilePoints[0])?.toFixed(2) ?? 'No ground data')+' m. Choose B.</p>';
     if(profilePoints.length!==2)return h;
-    const p=terrainProfile(site,...profilePoints),min=Math.min(...p.samples),max=Math.max(...p.samples),range=max-min;
+    const p=terrainProfile(site,...profilePoints);
+    if(p.incomplete)return h+'<p class="note">This profile crosses missing ground observations. Choose endpoints within continuous measured coverage.</p>';
+    const min=Math.min(...p.samples),max=Math.max(...p.samples),range=max-min;
     const graph=p.samples.map((z,i)=>[25+i*2,95-(range?(z-min)/range:.5)*65]);
     h+='<svg class="profile-chart" viewBox="0 0 250 125" role="img" aria-label="Interpolated terrain elevation profile">'+line(graph,'#315c70',2)+label([125,14],min.toFixed(2)+' to '+max.toFixed(2)+' m',11)+label([125,116],'A — '+p.distance.toFixed(1)+' m horizontal — B',10)+'</svg>';
     h+='<p>'+p.change.toFixed(2)+' m change · '+p.grade.toFixed(1)+'% average grade<br>'+p.rise.toFixed(2)+' m ascent · '+p.fall.toFixed(2)+' m descent</p><p class="note">Profile heights are interpolated. The chart scales height independently of distance.</p>';

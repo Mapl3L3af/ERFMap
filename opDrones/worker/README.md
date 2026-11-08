@@ -4,6 +4,18 @@ The erfMap server (`server.js`) handles uploads, jobs and the review UI. Video p
 
 ## Setup
 
+New jobs save a `captureProfile` based on `capture-profile.json`: 25 m above local ground, overhead view, and scale from a measured ground reference. Upload can supply `height_agl_m`; supplied heights are recorded separately from assumptions. Older jobs without a profile keep unknown height. Height above takeoff is not necessarily height above terrain.
+
+The worker passes this profile to segmenter, classifier, sketch/point review and reconstruction adapters and records it in stage reports. CLIP incorporates the height in its overhead text prompt. SegFormer and DeepForest still operate on image pixels; they do not accept altitude as a neural input. No pixel-to-metre conversion, object-size threshold or ground elevation is invented from altitude alone. Camera intrinsics, cropping, downsampling, camera angle and distance to roofs/canopies affect resolution.
+
+Path geometry uses observed corridor width as its continuity tolerance: short elongated fragments survive until joining, a lightly smoothed tracing mask suppresses edge spurs, and open centreline ends extend to the visible path extent. Aligned, similar-width fragments can bridge gaps up to three path widths (capped at a quarter of the frame side, alongside the existing base reach). Joined chains are fitted again to remove vertices caused only by detection breaks. Parallel corridors stay separate and bridging strokes cannot cross building pixels. Width stays in image pixels until measured ground calibration converts it to metres; 25 m altitude alone does not specify a path's diameter. Model masks still need visual review for grass spill and missed paving.
+
+For training, each Studio image records its own assumed, supplied or unknown height. The trainer validates and saves that provenance in `training-summary.json`. Use labelled flights around 25 m and evaluate on a separate flight at that height before claiming better accuracy. Changing the capture profile does not retrain existing weights.
+
+Map references are optional local imports under the collapsed advanced controls in scale calibration. Two or more image/longitude/latitude control pairs fit a similarity transform; a third or later point provides an alignment residual. A single control pair records position only. Import WGS84 GeoJSON (`properties.kind` building Polygon, path LineString with optional `width_m`, or ground Point with explicit metre height), or user-exported KML building polygons/path lines. Path width defaults to an assumed 3 m when unspecified. KML ground points require explicit absolute altitude and a stated vertical datum; clamp-to-ground zeros are not elevation evidence. Polygon holes are currently unsupported.
+
+`reference.json` holds the normalized, projected shapes and provenance. The model blends these masks into its image votes before zone geometry extraction; recorded reference agreement is reference-assisted, not an independent validation metric. Existing measured scale takes precedence; coordinate separation supplies approximate scale only when no measured reference exists. Reprocessing image alignment clears stale map references. Ground checks compare only fully observed terrain cells and remove a common datum offset before reporting relative-height RMSE. They never fabricate ground elevations or contours. Google Earth KML must be supplied by the user; live Google Maps/Elevation access is not configured.
+
 1. Install Python 3.10 or later and FFmpeg (`ffmpeg` and `ffprobe` must be on PATH).
 2. Create a project environment from the `opDrones` folder: `python3 -m venv .venv` (use Python 3.10+), then `.venv/bin/python -m pip install -r worker/requirements.txt` (NumPy, OpenCV headless and Pillow). On Windows use `python -m venv .venv` and `.venv\Scripts\python -m pip install -r worker/requirements.txt`.
 3. Start erfMap as usual (`node server.js`) and open **New Flyover** on the front page, or go to `/intake/`. The intake page lists which tools it found.
@@ -23,7 +35,7 @@ Set these before starting the server; the worker inherits the server's environme
 | --- | --- | --- |
 | Video & metadata | Video: `ffprobe` (container, codec, resolution, frame rate, rotation, creation time, camera tags, telemetry streams). Photos: size, plus camera, time and GPS-present flags from EXIF when Pillow is installed. GPS tags are never used. | Works. EXIF needs `pip install pillow`. |
 | 1. Frame selection | Video: FFmpeg processes the full video in 30-second extraction sections at up to 2 frames per second, preserving up to 1080 px of image height. There is no whole-video frame cap; every aligned usable frame is analyzed. Longer videos require more processing time and storage. Photos: each photo becomes a frame, downsized to 2000 px on the long side, and only clearly blurry or dark photos are dropped. OpenCV scores sharpness (Laplacian variance), brightness, contrast and edge texture. Frames are flagged as blurry, dark, overexposed, low texture or tilted (bright, featureless sky band). | Works. Tilt is a heuristic because the worker does not parse gimbal telemetry. |
-| 2. Image correction | CLAHE cleanup and denoising, then ORB/RANSAC planar alignment. Overlapping photos are matched in any order and stitched into one scene; disconnected photos stop with an explanation instead of inventing adjacency. Video frames are chained to a middle reference. | Lens correction needs camera.json. This is a planar stitch, not an orthomosaic. |
+| 2. Image correction | Preserve natural colour and texture, then ORB/RANSAC planar alignment. No local contrast enhancement, sharpening or denoising is applied to detection imagery; prepared frames and mosaics use lossless PNG. Overlapping photos are matched in any order and stitched into one scene; disconnected photos stop with an explanation instead of inventing adjacency. Video frames are chained to a middle reference. | Lens correction needs camera.json. This is a planar stitch, not an orthomosaic. |
 | Scale calibration | Select the two endpoints of one line segment on the assembled scene and specify its known length. That distance sets metres per pixel. | Required before map review. |
 | 3. Region detection | Classify the assembled scene once. The model council proposes zones and tree locations; candidate shadows are detected from local luminance. Without models, colour clusters remain unlabelled for correction. Benches and lights wait for zone approval. | CLIP or SegFormer enables automatic zone labels. |
 | 4. Classification | The bundled CLIP zero-shot adapter (`adapters/clip_classifier.py`) runs automatically once `open_clip_torch` is installed, or any command set in `ERFMAP_CLASSIFIER`. Predictions below 0.6 confidence, or with no label, are marked for review. | **Unavailable** until one is installed. Regions stay unlabelled, and the reviewer labels them. |
@@ -72,7 +84,7 @@ Install any of them; the ones that are missing sit out (the run's model note lis
 
 How the council votes (`adapters/clip_zones.py`):
 - **Zones:** CLIP and SegFormer each give every pixel a probability for building, path, road, grass and tree. They are averaged with `WEIGHTS`. SegFormer's own labels are mapped by name (`SYNONYMS`); where it sees something we don't map (sky, water) it does not vote there. DeepForest crowns pull their pixels towards tree (`TREE_WEIGHT`).
-- **Trees:** with DeepForest installed, each detected crown (score at least `TREE_MIN`) becomes a tree point. Without it, crowns are found in the combined tree scores.
+- **Trees:** CLIP includes lawn prompts and SegFormer retains grass probabilities so grass can compete with canopy evidence. DeepForest crowns need foliage and texture; a box is rejected before boosting tree scores when at least 70% of its disk has grass probability at least 0.65 and twice the tree probability. Semantic crowns fill detector misses, with nearby duplicates suppressed. These thresholds need validation on site imagery.
 - **Lamp posts and benches:** one member must be at least 0.6 sure; the confidence is the average of every member's score at that spot, so a lone vote ends up in review.
 - Each zone and point keeps every member's score (`votes`). Where members differ by more than 30 points the feature is flagged "models disagree" in Review.
 
@@ -85,7 +97,7 @@ Zones and points are then built in two stages:
 1. **Zones (polygons), in priority order.** A grid of overlapping windows is scored by CLIP as building, path, road, grass or tree, and the scores are smoothed with an edge-aware (guided) filter so boundaries move onto visible edges instead of following the window grid. Each building, path and road then flows along its own colour for a short distance (`fit_to_colour`), so curves and visible ends are followed, and outlines are rounded slightly. A per-photo greenness check (`vegetation`, excess green with an automatic threshold) keeps buildings, paths and roads off green pixels, so coarse scores cannot spread paving over lawns.
    - Buildings are reserved first, each traced as its own footprint.
    - Paths and roads come next, as separate classes covering their full width. Gaps along them are closed so they stay continuous through bends and junctions, and a zone that touches the photo edge is carried exactly to the edge. A path that ends inside the photo stops there.
-   - Grass is the fallback for everything left. A path or road that crosses a lawn splits it into separate grass polygons, and a lawn around a building keeps a hole for it, so zones never overlap.
+   - Grass is one default rectangle covering the full map, rendered below every detected feature. It has no classified boundaries, splits or holes. Grass scores are used internally to reject false tree proposals, not to create lawn patches.
    A higher-priority class wins where its score is within 80% of the best (`PRIORITY`). Buildings are squared up: each side is a best-fit straight line along or across the building's main direction, and sides meet at 90 degrees (`square_up`). Most roofs have a frame, a straight edge around the outside: long straight edges on bare ground are found (`frame_edges`), a bare, rectangular, not path-thin area whose outline mostly sits on them becomes a building even when the scores only lean that way (`framed`, `FRAME_LEAN`), and a building side with a frame edge along it is pinned to that edge. Paths are exported as erfMap `path` lines: the centre line is traced (`thin`, `trace`), split into straight segments, each a least-squares line (`fit_polyline`), carried to the photo edge where the path leaves it, and given the path's average width. Paths broken by shade, a tree or a coarse score are joined (`connect_paths`): two ends that point at each other within 35 degrees and 15% of the photo are joined into one line and the gap is filled in as path, and an end pointing at the side of another path within three path widths is carried on to meet it. Gaps never cross a building.
 2. **Points.** Trees (from tree-dominated areas, one per crown), lamp posts and benches each become one point at their visible location. A lamp post or bench needs at least 0.6 and twice the best surface score (`POINT_MIN`, `POINT_MARGIN`), so expect to add some by hand. A point never changes the zone under it.
 
@@ -108,7 +120,7 @@ Notes:
 - One distance calibrates scale **near the measured segment** only. Perspective, camera tilt, terrain and lens distortion make sizes elsewhere in the photo approximate. Measure something long (at least a tenth of the photo's width), away from the edges, ideally near the features you care about.
 - Overlapping photos are stitched with planar homographies. Weak overlap stops scene assembly. Perspective, relief and parallax can still distort the assembled scene; sizes remain approximate, with no geographic coordinates or measured heights.
 - The planar alignment assumes a roughly flat site seen from above. Relief, tall objects, oblique views and lens distortion are not removed.
-- There is no elevation model. Scenarios have no ground samples, 3D exports are flat, and contours are not offered. Connecting an OpenDroneMap DSM is future work.
+- There is no elevation model. Without a reconstruction adapter, scenarios have no measured ground samples and 3D exports are flat. A registered ground grid can be imported in the survey or supplied by the adapter below.
 - On the synthetic test video, scale from markers is within about 3% of ground truth, and a measured distance between two marker centres within 0.3%. Real footage will vary.
 
 ## Tests
@@ -131,3 +143,125 @@ If the detector returns no usable crowns, semantic crown detection remains activ
 Fallback marker size follows the measured canopy radius, and refined duplicate
 points are suppressed. These checks use RGB imagery; they estimate the visible
 crown centre, not a measured treetop height. Rerun analysis to update old markers.
+
+## Automatic capture checks
+
+New jobs run **Capture checks** after frame selection and before image correction. The saved report lists blur/low-texture warnings, existing exclusions, geometrically verified image pairs, estimated overlap and disconnected groups. Photo matching checks every usable pair; video matching checks the next three usable frames. Quality is scored on frame-selection imagery resized to a maximum side of 1024 px, not full-resolution originals. Thresholds and analysis sizes are stored in the report.
+
+Each connected group gets a planar footprint coverage preview: green is multiple views, amber one view, red suspected enclosed gaps. It cannot establish absolute survey completeness, detect every missing outer strip, or reveal terrain hidden under canopy. Disconnected groups have no known relative position. These checks do not run SfM or create terrain heights.
+
+Warnings pause processing for review. Use **Capture checks** in the job sidebar to inspect thumbnails and download the JSON report. **Continue with 2D mapping** records an acknowledgment and continues the existing planar workflow, even when multi-view reconstruction suitability is blocked. Zero usable captures cannot continue. Upload replacement or connecting imagery in a new flyover. Rerunning frame selection or capture checks clears the acknowledgment and rebuilds downstream outputs. Older completed jobs remain readable; retry frame selection to apply the checks.
+
+## Optional photogrammetry setup
+
+Open **Optional · Photogrammetry setup** before uploading a new flyover. It is off by default. Supply a NodeODM URL, check the connection, and optionally request a full 3D building model. Use at least three overlapping original photographs; realistic building coverage needs many more, including roofs and overlapping angled views of every side. The Info page includes capture guidance and a local Docker setup example.
+
+The URL and building-model option are saved per job. Worker subprocesses receive that job’s engine configuration; enabling one flyover does not enable other flyovers. Existing jobs without these settings retain environment-based adapter configuration. Existing stitched photo flyovers can change setup from the measurement panel; saving rebuilds frame selection and later stages and clears scale calibration and feature review. Angled views are allowed through frame screening for photogrammetry while blur, exposure and texture checks remain active. Capture checks do not verify facade completeness.
+
+Building-model requests explicitly set ODM `skip-3dmodel=false`. The engine’s `all.zip` remains in `nodeodm-all.zip` and is downloadable under Source imagery after reconstruction. erfMap uses the orthophoto and DTM; detailed building meshes/textures remain external artifacts and are not imported into the editable survey or feature-based GLB. Connection checks read engine information and options only; photo uploads occur during processing. An external NodeODM engine is required and is not installed by this setup.
+
+## Reconstruction terrain adapter
+
+Set `ERFMAP_RECONSTRUCTOR` to a local SfM reconstruction command before starting
+server. It runs during **Map geometry** (retry that stage for existing jobs).
+Like the other adapters it reads one JSON object from stdin and prints one JSON
+object on stdout; diagnostics go to stderr. The request contains the absolute
+`job` folder, frame-selection and correction results, confirmed `calibration`,
+map `scale` and `mosaic`. Original imagery remains under the job folder.
+
+The adapter must reconstruct depth, establish metric scale from measured control,
+align the vertical using gravity/vertical control, filter nonground points, and
+register its ground model to the stitched preview. A planar homography alone
+cannot establish heights. No precise GPS altitude is required. The adapter must
+resample ground heights onto an axis-aligned grid in preview pixels and return:
+
+```json
+{"units":"metres","coordinates":"mosaic-pixels",
+ "scaled":true,"gravity_aligned":true,"ground_filtered":true,
+ "source":"engine version and control/filtering description",
+ "origin_px":[0,0],"step_px":[10,10],"interval_m":0.5,
+ "grid":[[100,101],[100,101]]}
+```
+
+The grid has 2–256 rows/columns; `null` means no ground observation. Coordinates
+must lie inside the preview. Heights are shifted to the lowest observed ground
+sample. Contours are interpolated on triangles only in cells with four valid
+corners; holes are not filled. Source, interval and datum offset are retained in
+scenario exports. The survey preserves the registered grid, including missing cells. Its 3D surface,
+profiles and contours share the same triangle interpolation. GLB exports include
+ground elevation, terrain-offset features and visible contour lines.
+
+This is an integration boundary, **not a bundled SfM engine**. Without a configured
+adapter the existing 2D workflow remains available and contours remain unavailable.
+An invalid or failed adapter fails Map geometry rather than inventing elevations.
+OpenDroneMap is one possible engine: its [outputs](https://docs.opendronemap.org/outputs/)
+include DTM rasters, and [pc-classify](https://docs.opendronemap.org/arguments/pc-classify/)
+controls point-cloud classification. Its outputs still need scale, vertical-control
+and image-registration handling in the adapter. No ODM adapter or weights are installed
+by this change.
+
+## Run NodeODM locally
+
+Start Docker Desktop, then run `docker run --rm -p 3001:3000 opendronemap/nodeodm`.
+Install the worker requirements in `.venv`, including Rasterio, and start erfMap with
+`ERFMAP_NODEODM_URL=http://127.0.0.1:3001 node server.js`. This automatically
+selects `worker/nodeodm_adapter.py` when no explicit `ERFMAP_RECONSTRUCTOR` is set.
+An explicit custom reconstructor takes precedence. The adapter posts usable images to NodeODM, requests a DTM and ground classification,
+waits for completion, then downloads `all.zip`. New stitched jobs use the ODM
+orthophoto before calibration and labeling. Legacy planar jobs register its
+orthophoto to their existing preview with SIFT/RANSAC. Confirmed map scale is
+applied equally to horizontal and vertical dimensions. Resulting cells are validated by `terrain.py` and become
+survey terrain, contours and terrain-aware GLB geometry.
+
+NodeODM tasks can take hours and consume considerable RAM and disk. The timeout
+is `ERFMAP_NODEODM_TIMEOUT` seconds (default 7200). The NodeODM task UUID and
+server address are stored in `nodeodm-task.json` in the intake job folder. A
+failed or timed-out task remains on NodeODM for inspection. The original images
+and downloaded raster archive remain with the job; back up `.erfmap-data/`.
+
+Ground heights need a connected, sharp reconstruction. Registration requires at
+least 30 distinctive matches, 25 geometric inliers, and at most 8 mosaic pixels
+median reprojection error. A projected metre raster and at least four fully
+observed terrain cells are required. Inadequate overlap, missing DTM, or no
+reliable registration fail Map geometry with an explicit error. The resulting
+coordinates remain local and approximate. This does not turn a planar mosaic into
+a surveyed orthomosaic or recover hidden surfaces.
+
+### ODM orthophoto workflow and recovery
+
+With `ERFMAP_NODEODM_URL` configured (and no custom reconstructor), stitched
+jobs now reconstruct during **Image correction**, before scale calibration,
+labeling and merging. The orthophoto preview (up to 6000 pixels on its longest
+side) is the shared pixel frame. Terrain samples use its raster transform;
+no SIFT registration to a separate planar stitch is needed. Separate-photo
+sheets retain their per-photo workflow. Custom reconstructors retain their
+existing geometry-stage contract.
+
+Retry **Image correction** on an older stitched job to adopt this workflow;
+review scale references and labels again on the new orthophoto. Retrying only
+Map geometry on an older job retains its previous registration behavior.
+Original photos, including camera metadata, are sent when their source paths
+are available. ODM performs camera calibration. Extracted video frames remain
+JPEG captures. Metric scale still requires the existing measured-reference
+review; output coordinates and heights remain local, with accuracy and vertical
+alignment requiring independent verification.
+
+The adapter checks `/options` and image limits before upload. It fingerprints
+image contents and processing options, saves the task ID atomically, reconnects
+to queued/running/completed tasks on retry, and restarts failed/canceled tasks.
+Changed images or options create a fresh task. An interrupted upload creates a
+new upload session; an ambiguous commit fails visibly rather than silently
+launching duplicate processing. NodeODM tasks are retained for inspection.
+Failures save console output as `nodeodm-output.json`.
+
+`dem-gapfill-steps=0` disables ODM DEM hole filling. Raster NODATA remains null in
+the terrain grid, and contours skip incomplete cells. A DTM is still an estimated
+ground surface from classification and rasterization, not proof of direct
+observation of every cell. The downloaded archive retains other ODM assets for
+inspection; mesh import is not part of this workflow.
+
+## Path detail improvements
+
+Detection now retains up to 2048 pixels on the scene’s longest side. SegFormer blends overlapping 512-pixel tiles and reduces labels within each tile to bound memory. CLIP keeps its 1024-pixel contextual view. Paving retains finer edge detail; explicit lawn evidence constrains growth and unsupported bridges. Centre-line fitting preserves junction endpoints and avoids chords outside detected paving. Cross-sections supply local segment widths through review, survey rendering, walkthrough and GLB export; manually changing the width returns to a uniform stroke.
+
+Studio now defaults Path annotations to polygons. Existing centre-line labels remain supported, but full path boundaries and adjacent grass polygons are needed for boundary training. No new trained checkpoint is activated by these inference changes. A real-image visual review is under `artifacts/path-quality-improvement/`; it is not a held-out accuracy benchmark. Existing saved jobs require reevaluation.

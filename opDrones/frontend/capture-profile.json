@@ -1,0 +1,9 @@
+{
+  "version": 1,
+  "height_agl_m": 25,
+  "height_source": "assumed",
+  "view": "overhead",
+  "scale_source": "measured-ground-reference",
+  "note": "Nominal capture context; small height fluctuations are expected. Height is above local ground, not takeoff altitude, object height, map scale or terrain elevation.",
+  "height_mode": "nominal"
+}

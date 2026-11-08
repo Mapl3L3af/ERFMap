@@ -1,0 +1,9 @@
+{
+  "saved_path_pieces": 18,
+  "updated_path_pieces": 3,
+  "source": "Existing single-image flyover e7856f2195a0",
+  "comparison": "Saved inference versus rerun using updated capture prompt and path geometry; not a controlled accuracy benchmark.",
+  "height": "30 m nominal assumption, not verified from telemetry.",
+  "legend": "Yellow boundary and stroke show detected area/estimated width; magenta is the fitted centreline.",
+  "accuracy": "No held-out path annotations; inspect missed paths and false detections visually."
+}

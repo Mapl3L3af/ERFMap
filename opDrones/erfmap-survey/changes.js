@@ -2,7 +2,7 @@
 const projectChanges = (() => {
     const equal = (a, b) => JSON.stringify(a) === JSON.stringify(b);
     const index = site => new Map(site.features.map(f => [f._syncId, f]));
-    const fields = ['name','demo','w','h','samples','origin','contours','showContours','pedestrians','environment'];
+    const fields = ['name','demo','w','h','samples','groundGrid','terrain','contourInterval','localScale','accessReviewed','origin','contours','showContours','pedestrians','environment'];
     function diff(previous, next) {
         const before = index(previous), after = index(next);
         const put = next.features.filter(f => !equal(before.get(f._syncId), f));

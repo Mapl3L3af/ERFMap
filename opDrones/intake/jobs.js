@@ -8,6 +8,9 @@ const {spawn} = require('node:child_process');
 const {randomUUID} = require('node:crypto');
 const {kinds, restore} = require('../erfmap-survey/model');
 const shared = require('../erfmap-intake/shared');
+const {captureProfile} = require('./capture-profile');
+const mapReference = require('../erfmap-intake/reference');
+const reconstruction = require('./reconstruction');
 
 const STAGES = shared.STAGES;
 const WORKER = path.join(__dirname, '..', 'worker', 'erfmap_worker.py');
@@ -22,7 +25,7 @@ function labelMap() {
     catch { return {}; }
 }
 function labels() {
-    return {labels: Object.entries(kinds).map(([kind, [label, color, geometry]]) => ({kind, label, color, geometry})), map: labelMap()};
+    return {labels: Object.entries(kinds).map(([kind, [label, color, geometry]]) => ({kind, label, color, geometry})), map: labelMap(), captureProfile: captureProfile()};
 }
 
 function createIntake({directory, createProject, readBody}) {
@@ -34,10 +37,10 @@ function createIntake({directory, createProject, readBody}) {
     let capabilityCache = null;
     let stopping = false;
     const workers = new Set();
-    function spawnWorker(args) {
+    function spawnWorker(args, job) {
         if (stopping) throw failure(503, 'Server is stopping.');
         // A process group includes Python's FFmpeg and adapter subprocesses.
-        const child = spawn(python, args, {windowsHide: true, detached: process.platform !== 'win32'});
+        const child = spawn(python, args, {windowsHide: true, detached: process.platform !== 'win32', env: reconstruction.environment(job)});
         workers.add(child);
         child.once('close', () => { if (!stopping) workers.delete(child); });
         return child;
@@ -67,6 +70,11 @@ function createIntake({directory, createProject, readBody}) {
             for (const stage of Object.values(job.stages)) if (stage.status === 'processing') {
                 Object.assign(stage, {status: 'failed', error: 'Interrupted when the server stopped. Retry this stage.', finishedAt: new Date().toISOString()});
             }
+            // Existing completed jobs remain usable; retry frame selection to run new checks.
+            if (!job.stages.capture) job.stages.capture = {
+                status: ['queued', 'blocked'].includes(job.stages.correction?.status) ? 'queued' : 'complete',
+                progress: 0, attempts: 0, summary: 'Capture checks were not run for this older job. Retry frame selection to check it.'
+            };
             jobs.set(id, job);
         }
         return jobs.get(id);
@@ -108,6 +116,12 @@ function createIntake({directory, createProject, readBody}) {
     function reset(job, fromStage) {
         job.review = {features: {}, phase: 'zones', feedback: []};
         const start = STAGES.findIndex(s => s.id === fromStage);
+        if (start <= STAGES.findIndex(s => s.id === 'correction') && job.mapReference) {
+            delete job.mapReference;
+            write(path.join(dir(job.id), 'reference.json'), null);
+            job.calibration.references = (job.calibration.references || []).filter(r => r.id !== 'MAPREF');
+        }
+        if (start <= STAGES.findIndex(s => s.id === 'capture')) delete job.captureReview;
         for (const stage of STAGES.slice(start)) {
             if (stage.worker) fs.rmSync(path.join(dir(job.id), 'stages', stage.id), {recursive: true, force: true});
             const previous = job.stages[stage.id] || {};
@@ -121,6 +135,20 @@ function createIntake({directory, createProject, readBody}) {
         if (stopping || children.has(job.id) || job.started === false) return;
         for (const stage of STAGES) {
             const state = job.stages[stage.id];
+            if (stage.id === 'correction' && !job.captureReview) {
+                const report = result(job.id, 'capture');
+                if (report && report.readiness !== 'ready') {
+                    let changed = false;
+                    for (const later of STAGES.slice(STAGES.indexOf(stage))) {
+                        if (job.stages[later.id].status !== 'blocked') {
+                            Object.assign(job.stages[later.id], {status: 'blocked', progress: 0, summary: 'Review capture checks before continuing.'});
+                            changed = true;
+                        }
+                    }
+                    if (changed) save(job);
+                    return;
+                }
+            }
             if (stage.id === 'regions' && !(job.calibration?.references || []).some(r => r.confirmed !== false)) {
                 let changed = false;
                 for (const later of STAGES.slice(STAGES.indexOf(stage))) {
@@ -163,7 +191,7 @@ function createIntake({directory, createProject, readBody}) {
         Object.assign(state, {status: 'processing', progress: 0, message: 'Starting', error: undefined, startedAt: new Date().toISOString(), finishedAt: undefined, attempts: (state.attempts || 0) + 1});
         save(job);
         let child;
-        try { child = spawnWorker([WORKER, 'run', stage.id, dir(job.id)]); }
+        try { child = spawnWorker([WORKER, 'run', stage.id, dir(job.id)], job); }
         catch (e) { return finish(job, stage, {status: 'unavailable', reason: 'Could not start Python: ' + e.message}); }
         children.set(job.id, child);
         let buffer = '', stderr = '', last = null, settled = false;
@@ -214,7 +242,7 @@ function createIntake({directory, createProject, readBody}) {
         const features = reviewed(job);
         const keep = job.review?.features || {};
         const response = await new Promise((resolve, reject) => {
-            const child = spawnWorker([path.join(__dirname, '..', 'worker', 'scene_review.py'), dir(job.id)]);
+            const child = spawnWorker([path.join(__dirname, '..', 'worker', 'scene_review.py'), dir(job.id)], job);
             children.set(job.id, child);
             let out = '', err = '';
             const timer = setTimeout(() => child.kill(), 15 * 60 * 1000);
@@ -268,9 +296,13 @@ function createIntake({directory, createProject, readBody}) {
     // One video, or one or more photos. Photo jobs are created with the first
     // photo and ?defer=1, the rest are added to /originals, then /start runs them.
     async function upload(req, url) {
+        const capture = captureProfile(url.searchParams.get('height_agl_m'));
+        const reconstructionConfig = reconstruction.configuration({enabled: url.searchParams.get('photogrammetry') === '1', url: url.searchParams.get('nodeodm_url'), buildingModel: url.searchParams.get('building_model') === '1'});
+        if (reconstructionConfig.enabled) await reconstruction.check(reconstructionConfig);
         const name = cleanName(url.searchParams.get('name') || 'video.mp4');
         const media = PHOTO.test(name) ? 'photos' : VIDEO.test(name) ? 'video' : null;
         if (!media) throw failure(415, 'Choose a video (MP4, MOV, MKV, AVI, WebM) or photos (JPEG, PNG, TIFF, WebP).');
+        if (reconstructionConfig.enabled && (media !== 'photos' || url.searchParams.get('defer') !== '1')) throw failure(400, 'Photogrammetry needs a deferred upload of at least three original photographs.');
         const id = randomUUID().replace(/-/g, '').slice(0, 12);
         fs.mkdirSync(path.join(dir(id), 'original'), {recursive: true});
         const target = path.join(dir(id), 'original', name);
@@ -278,7 +310,7 @@ function createIntake({directory, createProject, readBody}) {
         try { size = await receive(req, target, MAX_UPLOAD); }
         catch (e) { fs.rmSync(dir(id), {recursive: true, force: true}); throw e; }
         const original = {name, path: 'original/' + name, size, type: req.headers['content-type'] || null};
-        const job = {id, name, media, sceneMode: 'stitched', createdAt: new Date().toISOString(), original, originals: [original], started: media === 'video' || url.searchParams.get('defer') !== '1',
+        const job = {id, name, media, captureProfile: capture, reconstruction: reconstructionConfig, sceneMode: 'stitched', createdAt: new Date().toISOString(), original, originals: [original], started: media === 'video' || url.searchParams.get('defer') !== '1',
             stages: Object.fromEntries(STAGES.map(s => [s.id, {status: 'queued', progress: 0, attempts: 0}])), calibration: {markers: [], references: [], markerSideM: 0.3048}, review: {features: {}, phase: 'zones', feedback: []}, imports: []};
         write(path.join(dir(id), 'labels.json'), labels());
         jobs.set(id, job);
@@ -319,6 +351,7 @@ function createIntake({directory, createProject, readBody}) {
         const parts = url.pathname.split('/').slice(3).map(decodeURIComponent);   // after /api/intake/
         if (parts[0] === 'capabilities' && req.method === 'GET') return json(await capabilities()), true;
         if (parts[0] === 'labels' && req.method === 'GET') return json(labels()), true;
+        if (parts[0] === 'reconstruction-check' && req.method === 'POST') return json(await reconstruction.check(await readBody(req))), true;
         if (parts[0] !== 'jobs') throw failure(404, 'Unknown intake address.');
         if (parts.length === 1) {
             if (req.method === 'GET') return json(list()), true;
@@ -336,6 +369,20 @@ function createIntake({directory, createProject, readBody}) {
             res.on('close', () => { clearInterval(beat); listeners.get(job.id)?.delete(res); });
             return true;
         }
+        if (action === 'capture-review' && req.method === 'POST') {
+            if (children.has(job.id)) throw failure(409, 'A stage is still running.');
+            const report = result(job.id, 'capture');
+            if (!report || !['complete', 'needs_review'].includes(job.stages.capture.status)) throw failure(409, 'Capture checks must finish first.');
+            if (!report.images.some(image => !image.excluded)) throw failure(400, 'No usable images remain. Upload sharper, well-lit imagery in a new flyover.');
+            const input = await readBody(req);
+            if (!['continue-2d', 'continue-reconstruction'].includes(input.action)) throw failure(400, 'Choose continue-2d or continue-reconstruction to acknowledge the capture report.');
+            if (input.action === 'continue-reconstruction' && (!job.reconstruction?.enabled || report.images.filter(image => !image.excluded).length < 3)) throw failure(400, 'Photogrammetry needs an enabled engine and at least three usable photographs.');
+            if (input.action === 'continue-2d' && job.reconstruction?.enabled) job.reconstruction = {enabled:false};
+            job.captureReview = {action: input.action, at: new Date().toISOString(), readiness: report.readiness,
+                reportFinishedAt: job.stages.capture.finishedAt, reasons: report.reasons};
+            save(job); advance(job);
+            return json(publicJob(job)), true;
+        }
         if (action === 'stages' && parts[3] && req.method === 'GET' && !parts[4]) {
             if (!STAGES.some(s => s.id === parts[3])) throw failure(404, 'Unknown stage.');
             if (parts[3] === 'review') return json({calibration: job.calibration, review: job.review, imports: job.imports}), true;
@@ -345,6 +392,10 @@ function createIntake({directory, createProject, readBody}) {
             const stage = STAGES.find(s => s.id === parts[3]);
             if (!stage || !stage.worker) throw failure(400, 'That stage cannot be rerun.');
             if (children.has(job.id)) throw failure(409, 'A stage is still running. Wait for it to finish.');
+            if (STAGES.indexOf(stage) > STAGES.findIndex(s => s.id === 'capture')) {
+                const report = result(job.id, 'capture');
+                if (report && report.readiness !== 'ready' && !job.captureReview) throw failure(409, 'Review capture checks before continuing.');
+            }
             const before = STAGES.slice(0, STAGES.indexOf(stage));
             if (before.some(s => !passable(s, job.stages[s.id]))) throw failure(409, 'Earlier stages must finish first.');
             reset(job, stage.id);
@@ -354,6 +405,7 @@ function createIntake({directory, createProject, readBody}) {
         if (action === 'originals' && req.method === 'POST') return json(await addPhoto(job, req, url), 201), true;
         if (action === 'start' && req.method === 'POST') {
             if (!job.started) {
+                if (job.reconstruction?.enabled && job.originals.length < 3) throw failure(400, 'Add at least three overlapping photographs before starting photogrammetry.');
                 job.started = true;
                 if (job.media === 'photos') job.name = job.originals.length === 1 ? job.original.name : job.originals.length + ' photos (' + job.original.name + ', …)';
                 save(job); advance(job);
@@ -361,6 +413,43 @@ function createIntake({directory, createProject, readBody}) {
             return json(publicJob(job)), true;
         }
         if (action === 'files' && req.method === 'GET') return serveFile(res, job, parts.slice(3).join('/')), true;
+        if (action === 'reconstruction' && req.method === 'POST') {
+            if (children.has(job.id)) throw failure(409, 'Wait for the current stage to finish before changing photogrammetry setup.');
+            const config = reconstruction.configuration(await readBody(req));
+            if (config.enabled && (job.media !== 'photos' || job.originals.length < 3 || job.sceneMode !== 'stitched')) throw failure(400, 'Photogrammetry setup needs a stitched flyover with at least three original photographs.');
+            if (config.enabled) await reconstruction.check(config);
+            // A connection check may take several seconds; recheck the job lock.
+            if (children.has(job.id)) throw failure(409, 'A stage is running. Try again when it finishes.');
+            job.reconstruction = config;
+            reset(job, 'frames');
+            job.calibration = {markers: [], references: [], markerSideM: job.calibration?.markerSideM || 0.3048};
+            write(path.join(dir(job.id), 'calibration.json'), job.calibration);
+            save(job); advance(job);
+            return json(publicJob(job)), true;
+        }
+        if (action === 'map-reference' && req.method === 'POST') {
+            if (children.has(job.id)) throw failure(409, 'Wait for processing to finish before changing map references.');
+            const mosaic = result(job.id, 'correction')?.mosaic;
+            if (!mosaic || job.sceneMode !== 'stitched') throw failure(400, 'Map references need an assembled scene.');
+            const input = await readBody(req, 8 * 1024 * 1024);
+            let reference;
+            try { reference = input.clear === true ? null : mapReference.prepare(input, [mosaic.width, mosaic.height]); }
+            catch (error) { throw failure(400, error.message); }
+            job.mapReference = reference;
+            write(path.join(dir(job.id), 'reference.json'), reference);
+            job.calibration ||= {markers:[],references:[]};
+            // Existing measured scale takes precedence. Two matched coordinates
+            // can supply an approximate distance when no ground measure exists.
+            job.calibration.references = (job.calibration.references || []).filter(r => r.id !== 'MAPREF');
+            if (reference?.transform && !job.calibration.references.some(r => r.confirmed !== false)) {
+                const [a,b] = reference.anchors;
+                job.calibration.references.push({id:'MAPREF',a:a.pixel,b:b.pixel,metres:Math.hypot(a.pixel[0]-b.pixel[0],a.pixel[1]-b.pixel[1])*reference.transform.metresPerPixel,confirmed:true,label:'Coordinate reference (approximate)'});
+            }
+            write(path.join(dir(job.id), 'calibration.json'), job.calibration);
+            reset(job, 'regions');
+            save(job); advance(job);
+            return json(publicJob(job)), true;
+        }
         if (action === 'calibration' && req.method === 'POST') {
             const input = await readBody(req);
             if (!Array.isArray(input.markers)) throw failure(400, 'Send a markers list.');
@@ -373,6 +462,12 @@ function createIntake({directory, createProject, readBody}) {
             const valid = input.markers.every(m => typeof m.id === 'string' && Array.isArray(m.corners) && m.corners.length === 4 && m.corners.every(c => Array.isArray(c) && c.length === 2 && c.every(Number.isFinite)));
             if (!valid) throw failure(400, 'Each marker needs an ID and four corner points.');
             if (job.stages.geometry.status === 'processing') throw failure(409, 'Map geometry is being built. Try again in a moment.');
+            const updatedCapture = input.height_agl_m === undefined ? null : captureProfile(input.height_agl_m);
+            if (updatedCapture && Object.values(job.stages).some(s => s.status === 'processing')) throw failure(409, 'Processing is in progress. Try again in a moment.');
+            if (updatedCapture) {
+                job.captureProfile = updatedCapture;
+                reset(job, 'regions');
+            }
             job.calibration = {markerSideM: side,
                 markers: input.markers.map(m => ({id: m.id.slice(0, 20), corners: m.corners, confirmed: m.confirmed === true, manual: m.manual === true, flags: Array.isArray(m.flags) ? m.flags.map(String) : [], frames: m.frames})),
                 references: references.map(r => ({id: r.id.slice(0, 20), a: r.a, b: r.b, metres: r.metres, label: String(r.label || '').slice(0, 80), confirmed: r.confirmed !== false, ...(typeof r.frame === 'string' ? {frame: r.frame.slice(0, 20)} : {})}))};
@@ -392,17 +487,17 @@ function createIntake({directory, createProject, readBody}) {
             const input = await readBody(req);
             const phase = job.review?.phase || 'zones';
             if (!['zones', 'points'].includes(phase)) throw failure(409, 'Return to zone or point review to make corrections.');
-            const allowed = phase === 'zones' ? ['building', 'path', 'tree', 'shadow'] : ['tree', 'bench', 'light', 'remove'];
+            const allowed = phase === 'zones' ? ['building', 'path', 'tree', 'shadow'] : ['tree', 'bush', 'bench', 'light', 'remove'];
             if (!Array.isArray(input.marks) || !input.marks.length || input.marks.length > 200 || !input.marks.every(m => allowed.includes(m.kind) && Array.isArray(m.p) && m.p.length === 2 && m.p.every(Number.isFinite))) throw failure(400, 'Provide up to 200 valid correction points.');
             const validPoint = p => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite);
             if (input.marks.some(m => m.stroke !== undefined && (!['zones', 'points'].includes(phase) || !Array.isArray(m.stroke) || m.stroke.length < 2 || m.stroke.length > 2000 || !m.stroke.every(validPoint) || !Number.isFinite(m.radius) || m.radius <= 0))) throw failure(400, 'Provide valid brush strokes and a positive radius.');
-            if (input.marks.some(m => m.outline !== undefined && (!['building', 'bench', 'light'].includes(m.kind) || !Array.isArray(m.outline) || m.outline.length < 3 || m.outline.length > 2000 || !m.outline.every(validPoint)))) throw failure(400, 'Provide a valid outline with at least three points.');
+            if (input.marks.some(m => m.outline !== undefined && (!['building', 'bush', 'bench', 'light'].includes(m.kind) || !Array.isArray(m.outline) || m.outline.length < 3 || m.outline.length > 2000 || !m.outline.every(validPoint)))) throw failure(400, 'Provide a valid outline with at least three points.');
             const geometry = result(job.id, 'geometry');
             if (!geometry?.scale) throw failure(409, 'Calibrate the scene first.');
             const sc = geometry.scale;
             if (input.marks.flatMap(m => (m.stroke || []).concat(m.outline || [], [m.p])).some(p => { const x = p[0] / sc.m_per_px + sc.origin_px[0], y = p[1] / sc.m_per_px + sc.origin_px[1]; return x < 0 || y < 0 || x >= geometry.mosaic.width || y >= geometry.mosaic.height; })) throw failure(400, 'Correction points must be inside the scene.');
             const feedback = [...(job.review?.feedback || []), ...input.marks];
-            await refine(job, phase === 'zones' ? 'zones' : 'dots', phase === 'zones' ? feedback.filter(m => ['building', 'path', 'tree', 'shadow'].includes(m.kind)) : feedback.filter(m => ['bench', 'light', 'tree', 'remove'].includes(m.kind)));
+            await refine(job, phase === 'zones' ? 'zones' : 'dots', phase === 'zones' ? feedback.filter(m => ['building', 'path', 'tree', 'shadow'].includes(m.kind)) : feedback.filter(m => ['bench', 'light', 'tree', 'bush', 'remove'].includes(m.kind)));
             job.review.feedback = feedback;
             save(job);
             return json({review: job.review}), true;
@@ -499,8 +594,9 @@ function createIntake({directory, createProject, readBody}) {
             return json({review: job.review}), true;
         }
         if (action === 'scenario' && req.method === 'GET') {
+            const exported = scenario(job);
             res.writeHead(200, {'Content-Type': 'application/json', 'Content-Disposition': 'attachment; filename="drone-intake-' + job.id + '.json"'});
-            res.end(JSON.stringify(scenario(job), null, 2));
+            res.end(JSON.stringify(exported, null, 2));
             return true;
         }
         if (action === 'import' && req.method === 'POST') {

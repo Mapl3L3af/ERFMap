@@ -16,6 +16,24 @@ const geometry = {
 };
 const job = {id: 'abc123abc123', name: 'flight.mp4', original: {name: 'flight.mp4'}};
 
+test('local path widths survive review, import and GLB export; manual edits use the new width', () => {
+    const {featureSegmentWidths} = require('../erfmap-survey/model');
+    const source = {...geometry, features:[{id:'walk',kind:'path',predicted_kind:'path',geometry:'line',
+        p:[[5,5],[15,5],[25,5]],region:[[5,4],[25,2],[25,8],[5,6]],width_m:2,widths_m:[2,6],frames:['scene'],flags:[]}]};
+    const features = S.reviewedFeatures(source,{walk:{kind:'path',status:'accepted'}},labels);
+    const site = restore(S.buildSite({job,geometry:source,features,labels}));
+    const path = site.features[0];
+    assert.deepStrictEqual(featureSegmentWidths(path),[2,6]);
+    const bytes = S.buildGlb(site,labels), view = new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+    const gltf = JSON.parse(new TextDecoder().decode(bytes.slice(20,20+view.getUint32(12,true))));
+    const mesh = gltf.meshes.find(m=>m.name===path.name), accessor = gltf.accessors[mesh.primitives[0].attributes.POSITION];
+    assert.strictEqual(accessor.max[2]-accessor.min[2],6,'export uses the wide section');
+    assert.deepStrictEqual(S.readGlb(bytes).site.features[0].tagProperties.widthProfile,[2,6]);
+    path.tagProperties.width = 3;
+    assert.deepStrictEqual(featureSegmentWidths(path),[3,3]);
+    assert.strictEqual(S.reviewedFeatures(source,{walk:{p:[[5,5],[25,5]],status:'accepted'}},labels)[0].widths,null);
+});
+
 test('only accepted features are exported, with provenance, and the result passes restore()', () => {
     const edits = {G1: {kind: 'building', height: 6, status: 'accepted'}, G2: {status: 'rejected'}, G3: {kind: 'path', status: 'accepted'}};
     const features = S.reviewedFeatures(geometry, edits, labels);
@@ -102,4 +120,18 @@ test('per-photo calibration travels with each feature into the scenario', () => 
     assert.deepStrictEqual(site.features[1].intake.approximateSize, {length_m: 10});
     assert.strictEqual(site.localScale.images.length, 2);
     assert.match(site.localScale.limits, /Approximate/);
+});
+
+test('registered terrain survives scenario shifting and reports contour availability', () => {
+    const terrain = {samples: [[10, 10, 0], [20, 10, 1], [10, 18, 0], [20, 18, 1]],
+        contours: [{height: .5, points: [[15, 10], [15, 18]]}], source: 'test reconstruction',
+        note: 'Observed cells only', interval_m: .5};
+    const g = {...geometry, terrain};
+    const features = S.reviewedFeatures(g, {G1: {kind: 'grass', status: 'accepted'}}, labels);
+    const site = restore(S.buildSite({job, geometry: g, features, labels}));
+    assert.deepStrictEqual(site.samples[0], [2, 2, 0]);
+    assert.deepStrictEqual(site.contours[0].points, [[7, 2], [7, 10]]);
+    assert.equal(site.showContours, true);
+    assert.equal(S.modelSummary(site, labels).contours.available, true);
+    assert.equal(S.modelSummary(site, labels).elevation.status, 'terrain');
 });
