@@ -67,8 +67,22 @@
             const region = f.region || f.p;
             let p = e.p && e.p.length >= minimum[type] ? e.p : kind === f.kind ? f.p : shapeFor(type, region);
             if (type === 'point') p = p.slice(0, 1);
+            if (kind === 'path' && geometry.mosaic && geometry.scale?.m_per_px) {
+                const sc = geometry.scale, limits = [geometry.mosaic.width - 1, geometry.mosaic.height - 1];
+                p = p.map(q => [...q]);
+                for (const index of [0, p.length - 1]) {
+                    const px = p[index].map((v, axis) => v / sc.m_per_px + sc.origin_px[axis]);
+                    const candidates = limits.flatMap((limit, axis) => [
+                        {distance: px[axis] / (limit + 1), axis, edge: 0},
+                        {distance: (limit - px[axis]) / (limit + 1), axis, edge: limit},
+                    ]).sort((a, b) => a.distance - b.distance);
+                    const nearest = candidates[0];
+                    if (nearest.distance >= 0 && nearest.distance <= .05)
+                        p[index][nearest.axis] = (nearest.edge - sc.origin_px[nearest.axis]) * sc.m_per_px;
+                }
+            }
             return {
-                id: f.id, kind, geometry: type, p, region, name: e.name || labelOf(labels, kind),
+                id: f.id, kind, geometry: type, p, region, name: e.name || f.name || labelOf(labels, kind),
                 predictedKind: f.predicted_kind || null, confidence: f.confidence ?? null, frames: f.frames || [],
                 flags: (f.flags || []).filter(x => !(e.kind && ['unlabelled', 'needs label'].includes(x))), note: f.note || null, width: f.width_m ?? null,
                 height: Number.isFinite(e.height) ? e.height : null, status: e.status || 'proposed',
@@ -78,11 +92,43 @@
         });
     }
 
+    function segmentPoint(p, a, b) {
+        const dx = b[0] - a[0], dy = b[1] - a[1];
+        const t = Math.max(0, Math.min(1, ((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy || 1)));
+        return [a[0] + t * dx, a[1] + t * dy];
+    }
+    function pathEnds(features, geometry) {
+        const paths = features.filter(f => f.kind === 'path' && f.status !== 'rejected');
+        const entrances = features.filter(f => f.kind === 'entrance' && f.status !== 'rejected');
+        const sc = geometry.scale, tolerance = Math.max(.15, sc.m_per_px * 3), result = [];
+        for (const path of paths) for (const index of [0, path.p.length - 1]) {
+            const p = path.p[index], px = [p[0] / sc.m_per_px + sc.origin_px[0], p[1] / sc.m_per_px + sc.origin_px[1]];
+            const distance = q => Math.hypot(p[0] - q[0], p[1] - q[1]);
+            const junction = paths.some(other => other.id !== path.id && other.p.slice(1).some((b, i) => distance(segmentPoint(p, other.p[i], b)) <= tolerance));
+            const edge = px[0] >= -3 && px[1] >= -3 && px[0] <= geometry.mosaic.width + 2 && px[1] <= geometry.mosaic.height + 2 && Math.min(px[0], px[1], geometry.mosaic.width - 1 - px[0], geometry.mosaic.height - 1 - px[1]) <= 3;
+            const entrance = entrances.some(e => distance(e.p[0]) <= tolerance);
+            result.push({path: path.id, index, p, type: junction ? 'junction' : edge ? 'edge' : entrance ? 'entrance' : 'unresolved'});
+        }
+        return result;
+    }
+    function edgeAccess(features, geometry) {
+        const result = [];
+        for (const end of pathEnds(features, geometry).filter(e => e.type === 'edge')) {
+            const near = f => Math.hypot(f.p[0][0] - end.p[0], f.p[0][1] - end.p[1]) < .15;
+            if (result.some(near) || features.some(f => f.kind === 'entrance' && f.status !== 'rejected' && near(f))) continue;
+            result.push({id: 'access-' + end.path + '-' + end.index, kind: 'entrance', geometry: 'point', p: [end.p], region: [end.p],
+                frames: ['scene'], flags: ['NPC spawn / leave at scene edge'], name: 'Path access', predicted_kind: 'entrance'});
+        }
+        return result;
+    }
+
     function buildSite({job, geometry, features, labels}) {
         const accepted = features.filter(f => f.status === 'accepted');
         const all = accepted.flatMap(f => f.p);
         const minX = all.length ? Math.min(...all.map(p => p[0])) : 0, minY = all.length ? Math.min(...all.map(p => p[1])) : 0;
-        const shift = p => [+(p[0] - minX + MARGIN).toFixed(3), +(p[1] - minY + MARGIN).toFixed(3)];
+        const sceneBounds = job.sceneMode === 'stitched' && geometry.mosaic && geometry.scale?.m_per_px;
+        const origin = sceneBounds ? geometry.scale.origin_px.map(v => -v * geometry.scale.m_per_px) : [minX - MARGIN, minY - MARGIN];
+        const shift = p => p.map((v, axis) => +(v - origin[axis]).toFixed(3));
         const out = accepted.map(f => {
             const feature = {kind: f.kind, p: f.p.map(shift), name: f.name, source: 'Drone intake'};
             if (f.height) feature.height = f.height;
@@ -103,8 +149,10 @@
         const scale = geometry.scale || {};
         return {
             name: 'Drone survey · ' + job.name.replace(/\.[^.]+$/, ''),
-            w: +((xs.length ? Math.max(...xs) : 0) + MARGIN).toFixed(2), h: +((ys.length ? Math.max(...ys) : 0) + MARGIN).toFixed(2),
+            w: sceneBounds ? (geometry.mosaic.width - 1) * geometry.scale.m_per_px : +((xs.length ? Math.max(...xs) : 0) + MARGIN).toFixed(2),
+            h: sceneBounds ? (geometry.mosaic.height - 1) * geometry.scale.m_per_px : +((ys.length ? Math.max(...ys) : 0) + MARGIN).toFixed(2),
             features: out, samples: [], showContours: false,
+            ...(job.sceneMode === 'stitched' ? {accessReviewed: true} : {}),
             localScale: scale.mode === 'per-image' ? {
                 label: 'Locally scaled, unreferenced', unreferenced: true,
                 method: 'One measured distance per photo; each photo scaled on its own',
@@ -265,5 +313,5 @@
         return out;
     }
 
-    return {STAGES, NO_ELEVATION, centroid, axis, shapeFor, sizeOf, reviewedFeatures, buildSite, modelSummary, triangulate, buildGlb, geometryOf};
+    return {STAGES, NO_ELEVATION, centroid, axis, shapeFor, sizeOf, reviewedFeatures, buildSite, modelSummary, triangulate, buildGlb, geometryOf, segmentPoint, pathEnds, edgeAccess};
 });

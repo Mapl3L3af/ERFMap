@@ -25,13 +25,16 @@ const pct = v => v == null ? '—' : Math.round(v * 100) + '%';
 // ---------------------------------------------------------------- home
 async function home() {
     document.getElementById('newJob').hidden = true;
-    app.innerHTML = '<div class="home"><section class="card"><small class="cap">Step 1 · Intake</small><h2>Upload drone video or photos</h2>'
-        + '<p>Upload one video, or one or more photos. Shoot as straight down as you can. Photos are calibrated one at a time: each needs something you measured on the ground in view (a sidewalk width, a tape measure laid flat, two cones a known distance apart). GPS is not needed and not used.</p>'
-        + '<div class="drop" id="drop"><p><b>Drop a video or photos here</b> or</p><label class="button primary">Choose files<input type="file" id="video" multiple accept="video/*,image/*,.mp4,.mov,.mkv,.avi,.webm,.mts,.jpg,.jpeg,.png,.tif,.tiff,.webp" hidden></label><p class="cap" id="uploadName"></p><div class="bar" id="uploadBar" hidden><i style="width:0"></i></div></div>'
-        + '<p id="uploadStatus" role="status"></p>'
-        + '<div class="note warn">The result is a <b>locally scaled, unreferenced</b> map: metres from an arbitrary origin, with no north and no world coordinates. Perspective, terrain, camera tilt and blur can still distort it. It is not survey-grade.</div></section>'
-        + '<section class="card"><small class="cap">Processing worker</small><h2>What can run here</h2><div id="caps"><p>Checking the worker…</p></div><h3>Recent intake jobs</h3><ul class="jobs" id="jobs"><li>Loading…</li></ul></section></div>';
+    app.innerHTML = '<div class="home"><section class="upload-intro"><small class="cap">New flyover</small><h2>Add video or photos</h2>'
+        + '<p>Choose one drone video or overlapping overhead photos of the same site.</p>'
+        + '<ol class="journey"><li><b>01</b> Add imagery</li><li><b>02</b> Set a distance</li><li><b>03</b> Review your map</li></ol></section>'
+        + '<section class="card upload-card"><div class="drop" id="drop"><h3>Drop your imagery here</h3><p>One video, or photos of the same site</p><label class="button primary" tabindex="0" id="filePicker">Choose video or photos<input type="file" id="video" multiple accept="video/*,image/*,.mp4,.mov,.mkv,.avi,.webm,.mts,.jpg,.jpeg,.png,.tif,.tiff,.webp" hidden></label><p class="cap" id="uploadName"></p><div class="bar" id="uploadBar" hidden><i style="width:0"></i></div></div>'
+        + '<p id="uploadStatus" role="status"></p><p class="upload-tip">Have a known ground distance handy, such as a sidewalk width. You’ll use it to set the map’s scale.</p>'
+        + '<details class="map-details"><summary>About your map</summary><p>Maps use local distances, with no GPS position or elevation. Camera angle and terrain can affect accuracy; results are not survey-grade.</p></details></section>'
+        + '<section class="recent-section"><h3>Recent flyovers</h3><ul class="jobs" id="jobs"><li>Loading flyovers…</li></ul></section>'
+        + '<details class="setup-details"><summary>Processing setup</summary><div id="caps"><p>Checking the worker…</p></div></details></div>';
     const input = document.getElementById('video'), drop = document.getElementById('drop');
+    document.getElementById('filePicker').onkeydown = e => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); input.click(); } };
     input.onchange = () => input.files.length && upload([...input.files]);
     drop.ondragover = e => { e.preventDefault(); drop.classList.add('over'); };
     drop.ondragleave = () => drop.classList.remove('over');
@@ -42,7 +45,7 @@ async function home() {
             const states = Object.values(j.stages);
             const status = states.includes('processing') ? 'processing' : states.includes('failed') ? 'failed' : j.stages.review === 'complete' ? 'complete' : states.includes('needs_review') ? 'needs_review' : 'queued';
             return '<li>' + chip(status) + '<a href="?job=' + j.id + '">' + esc(j.name) + '</a><span class="cap">' + new Date(j.createdAt).toLocaleString() + '</span></li>';
-        }).join('') : '<li>No intake jobs yet.</li>';
+        }).join('') : '<li class="empty-jobs">Your flyovers will appear here once you add imagery.</li>';
     });
 }
 function renderCaps(c) {
@@ -75,7 +78,9 @@ function send(url, file, onProgress) {
         xhr.send(file);
     });
 }
+let uploading = false;
 async function upload(files) {
+    if (uploading || !files.length) return;
     const bar = document.getElementById('uploadBar'), status = document.getElementById('uploadStatus');
     const isVideo = f => /^video\//.test(f.type) || /\.(mp4|mov|m4v|avi|mkv|webm|mts|m2ts|3gp)$/i.test(f.name);
     const isPhoto = f => /^image\//.test(f.type) || /\.(jpe?g|png|tiff?|webp|bmp)$/i.test(f.name);
@@ -85,9 +90,13 @@ async function upload(files) {
     }
     const list = videos.length ? videos : photos, total = list.reduce((s, f) => s + f.size, 0);
     document.getElementById('uploadName').textContent = (videos.length ? list[0].name : list.length + ' photo' + (list.length > 1 ? 's' : '')) + ' · ' + (total / 1048576).toFixed(1) + ' MB';
+    uploading = true;
+    document.getElementById('video').disabled = true;
+    document.getElementById('drop').setAttribute('aria-busy', 'true');
+    bar.firstElementChild.style.width = '0%';
     bar.hidden = false;
     let done = 0;
-    const progress = loaded => { bar.firstElementChild.style.width = (100 * (done + loaded) / total) + '%'; };
+    const progress = loaded => { bar.firstElementChild.style.width = (total ? 100 * (done + loaded) / total : 0) + '%'; };
     try {
         status.textContent = 'Uploading… originals are kept unchanged.';
         const created = await send('/api/intake/jobs?name=' + encodeURIComponent(list[0].name) + (photos.length ? '&defer=1' : ''), list[0], progress);
@@ -99,14 +108,15 @@ async function upload(files) {
         }
         if (photos.length) await api('/api/intake/jobs/' + created.id + '/start', {method: 'POST'});
         location.assign('?job=' + created.id);
-    } catch (e) { status.textContent = e.message; }
+    } catch (e) { status.textContent = e.message + ' Choose your files again to retry.'; }
+    finally { uploading = false; document.getElementById('video').disabled = false; document.getElementById('video').value = ''; document.getElementById('drop').removeAttribute('aria-busy'); }
 }
 
 // ---------------------------------------------------------------- job page
 async function openJob(id) {
     document.getElementById('newJob').hidden = false;
     labels = (await api('/api/intake/labels')).labels;
-    app.innerHTML = '<div class="layout"><aside><ol class="stages" id="stages"></ol><section class="card" style="margin-top:12px" id="original"></section></aside><section class="card" id="panel"><p>Loading…</p></section></div>';
+    app.innerHTML = '<div class="layout single-review"><aside><ol class="stages" id="stages"></ol><details class="source-details"><summary>Source imagery</summary><section id="original"></section></details></aside><section class="card" id="panel"><p>Loading…</p></section></div>';
     const events = new EventSource('/api/intake/jobs/' + id + '/events');
     events.addEventListener('job', e => update(JSON.parse(e.data)));
     events.onerror = () => { if (!job) app.innerHTML = '<div class="note err">That intake job could not be opened.</div>'; };
@@ -125,24 +135,26 @@ function update(next) {
             ? '<small class="cap">Original photos (kept unchanged)</small><p>' + originals.length + ' photo' + (originals.length > 1 ? 's' : '') + ' · ' + (originals.reduce((s, o) => s + o.size, 0) / 1048576).toFixed(1) + ' MB</p><details><summary>Files</summary><ul>' + originals.map(o => '<li><a href="' + fileUrl(o.path) + '" download>' + esc(o.name) + '</a></li>').join('') + '</ul></details>'
             : '<small class="cap">Original video (kept unchanged)</small><p>' + esc(job.original.name) + '<br><span class="cap">' + (job.original.size / 1048576).toFixed(1) + ' MB · uploaded ' + new Date(job.createdAt).toLocaleString() + '</span></p><a class="button" href="' + fileUrl(job.original.path) + '" download>Download original</a>';
     }
+    // Keep one workspace open, moving from reference line to processing to review.
+    const unlocked = (job.calibration?.references || []).some(r => r.confirmed !== false);
+    const preparation = ['probe', 'frames', 'correction', 'markers'];
+    const preparing = preparation.find(id => !['complete', 'needs_review'].includes(job.stages[id].status));
+    const processing = S.STAGES.filter(s => s.worker && !preparation.includes(s.id));
+    const waiting = processing.find(s => !['complete', 'needs_review'].includes(job.stages[s.id].status)
+        && !(s.optional && job.stages[s.id].status === 'unavailable'));
+    const previousSelected = selected;
+    selected = preparing || (!unlocked ? 'markers' : waiting?.id || 'review');
     renderStages();
     const state = job.stages[selected];
     const key = [state.status, state.attempts, state.finishedAt, selected === 'review' ? job.imports?.length : ''].join('|');
-    if (shown[selected] !== key) { shown[selected] = key; delete results[selected]; renderPanel(); }
+    if (previousSelected !== selected || shown[selected] !== key) { shown[selected] = key; delete results[selected]; renderPanel(); }
     else if (state.status === 'processing') renderHead();
 }
 function renderStages() {
-    document.getElementById('stages').innerHTML = S.STAGES.map(s => {
-        const st = job.stages[s.id];
-        return '<li><button type="button" data-stage="' + s.id + '" aria-current="' + (s.id === selected) + '"><span class="num">' + (s.step || (s.id === 'markers' ? '⌗' : '▶')) + '</span><span class="name">' + s.title + '</span>' + chip(st.status)
-            + (st.status === 'processing' ? '<div class="bar"><i style="width:' + Math.round(100 * (st.progress || 0)) + '%"></i></div>' : '')
-            + '<span class="sum">' + esc(st.status === 'processing' ? st.message : st.error || st.summary || '') + '</span></button></li>';
-    }).join('');
+    const phase = ['probe', 'frames', 'correction'].includes(selected) ? 0 : selected === 'markers' ? 1 : selected === 'review' ? 3 : 2;
+    const steps = ['Prepare imagery', 'Set the scale', 'Build the map', 'Review & finish'];
+    document.getElementById('stages').innerHTML = steps.map((title, i) => '<li class="' + (i < phase ? 'done' : i === phase ? 'active' : '') + '"' + (i === phase ? ' aria-current="step"' : '') + '><span class="step-number">' + (i < phase ? '✓' : i + 1) + '</span><span>' + title + '</span></li>').join('');
 }
-document.addEventListener('click', e => {
-    const b = e.target.closest('[data-stage]');
-    if (b && job) { selected = b.dataset.stage; history.replaceState(null, '', '?job=' + job.id + '&stage=' + selected); renderStages(); shown[selected] = null; update(job); }
-});
 
 function guidance(stage) {
     return {
@@ -154,9 +166,10 @@ function guidance(stage) {
 }
 function headMarkup() {
     const meta = S.STAGES.find(s => s.id === selected), st = job.stages[selected];
-    let h = '<div class="panelhead"><div><small class="cap">' + (meta.step ? 'Stage ' + meta.step + ' of 7' : meta.id === 'markers' ? 'Scale calibration' : 'Intake') + '</small><h2>' + meta.title + ' ' + chip(st.status) + '</h2><p>' + esc(st.summary || (st.status === 'blocked' ? 'Waiting for an earlier stage.' : st.status === 'queued' ? 'Queued.' : '')) + '</p></div>';
+    const title = selected === 'markers' ? 'Set the scale' : selected === 'review' ? 'Review the map' : ['failed', 'unavailable'].includes(st.status) ? 'Processing needs attention' : ['probe', 'frames', 'correction'].includes(selected) ? 'Preparing your imagery' : 'Building your map';
+    let h = '<div class="panelhead"><div><small class="cap">' + (meta.id === 'markers' ? '1 · Reference line' : meta.id === 'review' ? '3 · Feature review' : ['probe', 'frames', 'correction'].includes(meta.id) ? 'Preparing reference image' : '2 · Processing') + '</small><h2>' + title + ' ' + chip(st.status) + '</h2><p>' + esc(st.summary || (st.status === 'blocked' ? 'Waiting for an earlier stage.' : st.status === 'queued' ? 'Queued.' : '')) + '</p></div>';
     if (meta.worker && ['failed', 'unavailable'].includes(st.status)) h += '<button type="button" class="primary" data-retry="' + selected + '">Retry this stage</button>';
-    else if (meta.worker && ['complete', 'needs_review'].includes(st.status)) h += '<button type="button" data-retry="' + selected + '" title="Earlier stages are kept. This stage and the ones after it run again.">Run again from here</button>';
+    else if (meta.worker && ['complete', 'needs_review'].includes(st.status) && selected !== 'markers') h += '<button type="button" data-retry="' + selected + '" title="Earlier stages are kept. This stage and the ones after it run again.">Run again from here</button>';
     h += '</div>';
     if (st.status === 'processing') h += '<div class="bar"><i style="width:' + Math.round(100 * (st.progress || 0)) + '%"></i></div><p class="cap">' + esc(st.message || '') + '</p>';
     if (st.status === 'failed') h += '<div class="note err"><b>This stage failed.</b> ' + esc(st.error) + (st.log ? '<details><summary>Worker log</summary><pre>' + esc(st.log) + '</pre></details>' : '') + '<p>Earlier stages are kept; retrying runs this stage and the ones after it.</p></div>';
@@ -168,10 +181,14 @@ function headMarkup() {
 function renderHead() { const head = document.getElementById('head'); if (head) head.innerHTML = headMarkup(); }
 async function renderPanel() {
     const panel = document.getElementById('panel'), st = job.stages[selected];
+    document.body.classList.remove('review-workspace', 'show-review-stages');
     viewer = null; view = {};
     panel.innerHTML = '<div id="head">' + headMarkup() + '</div><div id="body"></div>';
     const ready = ['complete', 'needs_review', 'unavailable'].includes(st.status);
-    if (!ready && !(selected === 'review' && st.status !== 'blocked')) return;
+    if (!ready && !(selected === 'review' && st.status !== 'blocked')) {
+        if (['processing', 'queued', 'blocked'].includes(st.status)) document.getElementById('body').innerHTML = '<div class="processing-state"><span class="processing-orbit" aria-hidden="true"></span><h3>' + (['probe', 'frames', 'correction'].includes(selected) ? 'Preparing the reference image' : 'Detecting buildings, paths and other features') + '</h3><p>This page updates automatically. You can leave and return from the flyover list.</p></div>';
+        return;
+    }
     try {
         const data = results[selected] || await api('/api/intake/jobs/' + job.id + '/stages/' + selected);
         results[selected] = data;
@@ -243,7 +260,6 @@ function viewCorrection(body, data) {
 
 // ---- scale calibration
 const UNITS = {ft: 0.3048, in: 0.0254, m: 1, cm: 0.01};
-const markerSide = m => { const c = m.corners; return [0, 1, 2, 3].reduce((s, i) => s + Math.hypot(c[i][0] - c[(i + 1) % 4][0], c[i][1] - c[(i + 1) % 4][1]), 0) / 4; };
 const refLength = r => Math.hypot(r.a[0] - r.b[0], r.a[1] - r.b[1]);
 const fmtLength = m => m >= 1 ? m.toFixed(2) + ' m (' + (m / 0.3048).toFixed(1) + ' ft)' : (m * 100).toFixed(1) + ' cm (' + (m / 0.0254).toFixed(1) + ' in)';
 // Photos: one measured distance per photo, each photo scaled on its own.
@@ -266,7 +282,7 @@ async function viewPerImage(body, data) {
         + '<br>A single distance sets the scale <b>near the measured segment</b>. Perspective, camera tilt, terrain and lens distortion make sizes elsewhere in the photo approximate. Results are <b>locally scaled, unreferenced</b>: no geographic coordinates and no heights.</div>'
         + '<div class="split"><div id="mviewer"></div><div>'
         + '<div id="refForm" hidden class="card" style="margin-bottom:8px;padding:10px"><b id="refFor"></b><label>Distance between A and B <div class="row"><input id="refValue" type="number" min="0" step="any" style="width:110px"><select id="refUnit"><option value="ft">ft</option><option value="m">m</option><option value="in">in</option><option value="cm">cm</option></select></div></label><label>What is it? <input id="refLabel" placeholder="e.g. sidewalk width, tape measure" style="width:100%"></label><div class="row" style="margin-top:6px"><button type="button" class="primary" id="refAdd">Use this distance</button><button type="button" id="refCancel">Cancel</button></div></div>'
-        + '<div class="row"><button type="button" class="primary" id="saveMarkers">Save calibration</button></div><p id="mstatus" class="cap"></p><div class="list" id="mlist"></div></div></div>';
+        + '<div class="row"><button type="button" class="primary" id="saveMarkers">Save scale &amp; continue</button></div><p id="mstatus" class="cap"></p><div class="list" id="mlist"></div></div></div>';
     const v = viewer = createViewer(document.getElementById('mviewer'), {image: fileUrl(data.mosaic.image), width: data.mosaic.width, height: data.mosaic.height, hint: 'Zoom in before clicking. Drag the white handles to adjust a segment.'});
     const text = (x, y, t, k, anchor = 'start') => '<text x="' + x + '" y="' + y + '" font-size="' + 13 * k + '" text-anchor="' + anchor + '" fill="#fff" stroke="#000" stroke-width="' + 3 * k + '" paint-order="stroke">' + esc(t) + '</text>';
     const draw = () => {
@@ -348,131 +364,46 @@ async function viewPerImage(body, data) {
     };
     document.getElementById('saveMarkers').onclick = async () => {
         const note = t => { const el = document.getElementById('mstatus'); if (el) el.textContent = t; };
-        try { await api('/api/intake/jobs/' + job.id + '/calibration', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({markers: [], references: refs, markerSideM: job.calibration?.markerSideM || 0.3048})}); dirty = false; delete results.geometry; note('Saved. Map geometry is being rebuilt.'); }
+        try { await api('/api/intake/jobs/' + job.id + '/calibration', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({markers: [], references: refs, markerSideM: job.calibration?.markerSideM || 0.3048})}); dirty = false; delete results.geometry; note('Scale saved. Building your map…'); }
         catch (e) { note(e.message); }
     };
     list();
 }
 async function viewMarkers(body, data) {
     if (data.mode === 'per-image') return viewPerImage(body, data);
-    const markers = JSON.parse(JSON.stringify(job.calibration?.markers || []));
-    const references = JSON.parse(JSON.stringify(job.calibration?.references || []));
-    let sideM = job.calibration?.markerSideM || 0.3048;
-    const detected = Object.fromEntries((data.markers || []).map(m => [m.id, m]));
-    let active = markers[0]?.id || null, adding = null, measuring = null, pendingRef = null, dirty = false;
-    body.innerHTML = '<div class="note">Scale comes from things of known size in the imagery. Use either or both:'
-        + '<br>• <b>Square marker boards.</b> Detected automatically; confirm or correct their corners. Set the board size below if yours are not 1 ft.'
-        + '<br>• <b>Measured distance.</b> Click two points you measured on the ground (tape ends, cones, a parking-space width) and enter the distance.'
-        + '<br>Each reference sets the scale <b>near itself only</b>. Several spread across the site let erfMap take a median and show when they disagree, which points to tilt, terrain relief or a mis-click. Results stay <b>locally scaled, unreferenced</b>.</div>'
+    let reference = JSON.parse(JSON.stringify(job.calibration?.references?.find(r => !r.frame) || null));
+    let points = reference ? [reference.a, reference.b] : [];
+    body.innerHTML = '<p>Click the two ends of a line segment, then enter its known length.</p>'
         + '<div class="split"><div id="mviewer"></div><div>'
-        + '<label class="row" style="margin-bottom:8px">Marker board side <input id="sideValue" type="number" min="0.01" step="any" style="width:90px"><select id="sideUnit"><option value="ft">ft</option><option value="in">in</option><option value="m">m</option><option value="cm">cm</option></select></label>'
-        + '<div class="row"><button type="button" id="measure">Measure a known distance</button><button type="button" id="addMarker">Add marker by hand</button></div>'
-        + '<div id="refForm" hidden class="card" style="margin-top:8px;padding:10px"><label>Distance between A and B <div class="row"><input id="refValue" type="number" min="0" step="any" style="width:110px"><select id="refUnit"><option value="ft">ft</option><option value="m">m</option><option value="in">in</option><option value="cm">cm</option></select></div></label><label>What is it? <input id="refLabel" placeholder="e.g. tape measure, parking space" style="width:100%"></label><div class="row" style="margin-top:6px"><button type="button" class="primary" id="refAdd">Add distance</button><button type="button" id="refCancel">Cancel</button></div></div>'
-        + '<div class="row" style="margin-top:8px"><button type="button" class="primary" id="saveMarkers">Save calibration</button></div><p id="mstatus" class="cap"></p><div class="list" id="mlist"></div><div id="mscale"></div></div></div>';
-    const v = viewer = createViewer(document.getElementById('mviewer'), {image: fileUrl(data.mosaic.image), width: data.mosaic.width, height: data.mosaic.height, hint: 'Scroll to zoom in before clicking points. Drag white handles to correct them.'});
-    const sideInput = document.getElementById('sideValue'), sideUnit = document.getElementById('sideUnit');
-    const showSide = () => { const unit = Math.abs(sideM / 0.3048 - Math.round(sideM / 0.3048)) < 1e-6 ? 'ft' : 'm'; sideUnit.value = unit; sideInput.value = +(sideM / UNITS[unit]).toFixed(4); };
-    showSide();
-    const estimates = () => [...markers.filter(m => m.confirmed).map(m => sideM / markerSide(m)), ...references.filter(r => r.confirmed !== false).map(r => r.metres / refLength(r))];
-    const label = (x, y, text, k) => '<text x="' + x + '" y="' + y + '" font-size="' + 12 * k + '" text-anchor="middle" fill="#fff" stroke="#000" stroke-width="' + 3 * k + '" paint-order="stroke">' + esc(text) + '</text>';
+        + '<label class="row">Known length <input id="lengthValue" type="number" min="0" step="any" style="width:100px"><select id="lengthUnit"><option value="ft">ft</option><option value="in">in</option><option value="m">m</option><option value="cm">cm</option></select></label>'
+        + '<div class="row"><button type="button" id="redrawSegment">Redraw segment</button><button type="button" class="primary" id="saveMarkers">Save scale &amp; continue</button></div><p id="mstatus" class="cap"></p></div></div>';
+    const v = viewer = createViewer(document.getElementById('mviewer'), {image: fileUrl(data.mosaic.image), width: data.mosaic.width, height: data.mosaic.height, hint: 'Click two endpoints. Drag the handles to adjust the segment.'});
+    const input = document.getElementById('lengthValue'), unit = document.getElementById('lengthUnit');
+    if (reference) { unit.value = 'm'; input.value = reference.metres; }
+    const note = message => { document.getElementById('mstatus').textContent = message; };
     const draw = () => {
         const k = v.scale;
-        let s = '';
-        for (const m of markers) {
-            const colour = m.confirmed ? '#8ec26a' : m.flags?.length ? '#e0705f' : '#e8b04f';
-            s += '<polygon points="' + pts(m.corners) + '" fill="' + colour + '" fill-opacity=".18" stroke="' + colour + '" stroke-width="' + (m.id === active ? 2.5 : 1.5) + '" vector-effect="non-scaling-stroke" data-marker="' + m.id + '"/>';
-            const c = m.corners.reduce((a, p) => [a[0] + p[0] / 4, a[1] + p[1] / 4], [0, 0]);
-            s += label(c[0], Math.min(...m.corners.map(p => p[1])) - 6 * k, m.id, k);
-            if (m.id === active) m.corners.forEach((p, i) => s += '<circle data-handle="m:' + m.id + ':' + i + '" cx="' + p[0] + '" cy="' + p[1] + '" r="' + 5 * k + '" fill="#fff" stroke="#155d76" stroke-width="2" vector-effect="non-scaling-stroke" style="cursor:move"/>');
-        }
-        for (const r of [...references, ...(pendingRef ? [pendingRef] : [])]) {
-            const on = r.id === active || r === pendingRef;
-            s += '<line data-ref="' + r.id + '" x1="' + r.a[0] + '" y1="' + r.a[1] + '" x2="' + r.b[0] + '" y2="' + r.b[1] + '" stroke="#6fb3e0" stroke-width="' + (on ? 3 : 2) + '" vector-effect="non-scaling-stroke"/>';
-            s += label((r.a[0] + r.b[0]) / 2, (r.a[1] + r.b[1]) / 2 - 6 * k, r === pendingRef ? 'A–B' : r.id + ' · ' + fmtLength(r.metres), k);
-            if (on) ['a', 'b'].forEach(end => s += '<circle data-handle="r:' + r.id + ':' + end + '" cx="' + r[end][0] + '" cy="' + r[end][1] + '" r="' + 5 * k + '" fill="#fff" stroke="#155d76" stroke-width="2" vector-effect="non-scaling-stroke" style="cursor:move"/>');
-        }
-        for (const p of adding || measuring || []) s += '<circle cx="' + p[0] + '" cy="' + p[1] + '" r="' + 4 * k + '" fill="#c2e69e"/>';
-        v.draw(s);
+        let svg = points.length === 2 ? '<line x1="' + points[0][0] + '" y1="' + points[0][1] + '" x2="' + points[1][0] + '" y2="' + points[1][1] + '" stroke="#8ec26a" stroke-width="3" vector-effect="non-scaling-stroke"/>' : '';
+        points.forEach((p, i) => { svg += '<circle data-handle="segment:' + i + '" cx="' + p[0] + '" cy="' + p[1] + '" r="' + 5 * k + '" fill="#fff" stroke="#155d76" stroke-width="2" vector-effect="non-scaling-stroke"/>'; });
+        v.draw(svg);
     };
     v.redraw = draw;
-    const list = () => {
-        const rows = markers.map(m => {
-            const d = detected[m.id];
-            return '<div data-pick="' + m.id + '" aria-selected="' + (m.id === active) + '"><b>' + m.id + '</b> marker ' + (m.confirmed ? '<span class="flag good">confirmed</span>' : '<span class="flag">unconfirmed</span>') + (m.manual ? ' <span class="flag">placed by hand</span>' : '')
-                + '<br><span class="cap">' + (d ? d.frames.length + ' frames · ' + d.side_px_frame + ' px side in frame' : 'manual') + ' · ' + (sideM / markerSide(m) * 100).toFixed(2) + ' cm/px</span><br>' + flags(m.flags, ['blurry', 'small', 'few', 'obscured'])
-                + '<div class="row" style="margin-top:6px"><button type="button" data-confirm="' + m.id + '">' + (m.confirmed ? 'Unconfirm' : 'Confirm corners') + '</button>' + (m.manual ? '<button type="button" data-remove="' + m.id + '">Remove</button>' : '') + '</div></div>';
-        }).concat(references.map(r => '<div data-pick="' + r.id + '" aria-selected="' + (r.id === active) + '"><b>' + r.id + '</b> measured distance <span class="flag good">' + esc(fmtLength(r.metres)) + '</span>' + (r.label ? '<br>' + esc(r.label) : '')
-            + '<br><span class="cap">' + refLength(r).toFixed(1) + ' px · ' + (r.metres / refLength(r) * 100).toFixed(2) + ' cm/px</span><div class="row" style="margin-top:6px"><button type="button" data-remove="' + r.id + '">Remove</button></div></div>'));
-        document.getElementById('mlist').innerHTML = rows.join('') || '<div>No scale references yet. Measure a known distance, or add a marker by hand.</div>';
-        const all = estimates().sort((a, b) => a - b);
-        const median = all.length ? (all[Math.floor((all.length - 1) / 2)] + all[Math.ceil((all.length - 1) / 2)]) / 2 : null;   // same as the worker's numpy median
-        const spread = all.length > 1 ? Math.sqrt(all.reduce((s, x) => s + (x - median) ** 2, 0) / all.length) / median : null;
-        document.getElementById('mscale').innerHTML = '<h3>Scale</h3>' + (median ? '<p>' + (median * 100).toFixed(3) + ' cm per preview pixel, from ' + all.length + ' confirmed reference' + (all.length > 1 ? 's' : '') + '.</p>' + (spread == null ? '<div class="note warn">One reference: scale is only reliable near it. Add another across the site to check it.</div>' : '<p>References disagree by ' + (spread * 100).toFixed(1) + '%.' + (spread > .1 ? '</p><div class="note warn">Over 10%: check for a mis-clicked point, camera tilt, relief or misaligned frames.</div>' : '</p>')) : '<p>Nothing confirmed yet. Map geometry waits for at least one scale reference.</p>');
-        document.getElementById('mstatus').textContent = adding ? 'Click corner ' + (adding.length + 1) + ' of 4 on the preview.' : measuring ? 'Click point ' + (measuring.length ? 'B' : 'A') + ' on the preview.' : pendingRef ? 'Enter the measured distance.' : dirty ? 'Unsaved changes. Saving reruns Map geometry only.' : '';
-        draw();
-    };
-    const focus = id => {
-        const m = markers.find(x => x.id === id), r = references.find(x => x.id === id);
-        const p = m ? m.corners : r ? [r.a, r.b] : null; if (!p) return;
-        const xs = p.map(q => q[0]), ys = p.map(q => q[1]); v.focus(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys), m ? 6 : 1.6);
-    };
-    v.onDrag = (handle, p) => {
-        const [type, id, i] = handle.split(':');
-        if (type === 'm') { const m = markers.find(x => x.id === id); m.corners[+i] = p; m.confirmed = true; }
-        else { const r = references.find(x => x.id === id); if (r) r[i] = p; }
-        dirty = true; draw();
-    };
-    v.onDragEnd = () => list();
-    const nextId = prefix => { let n = 1; while (markers.some(m => m.id === prefix + n) || references.some(r => r.id === prefix + n)) n++; return prefix + n; };
-    v.onClick = (p, target) => {
-        if (adding) {
-            adding.push(p);
-            if (adding.length === 4) {
-                const c = adding.reduce((a, q) => [a[0] + q[0] / 4, a[1] + q[1] / 4], [0, 0]);
-                const corners = [...adding].sort((a, b) => Math.atan2(a[1] - c[1], a[0] - c[0]) - Math.atan2(b[1] - c[1], b[0] - c[0]));
-                active = nextId('H'); markers.push({id: active, corners, confirmed: true, manual: true, flags: []});
-                adding = null; dirty = true;
-            }
-            list(); return;
-        }
-        if (measuring) {
-            measuring.push(p);
-            if (measuring.length === 2) {
-                pendingRef = {id: 'pending', a: measuring[0], b: measuring[1]}; measuring = null;
-                document.getElementById('refForm').hidden = false; document.getElementById('refValue').focus();
-            }
-            list(); return;
-        }
-        const hit = target.closest?.('[data-marker],[data-ref]');
-        if (hit) { active = hit.dataset.marker || hit.dataset.ref; list(); }
-    };
-    body.querySelector('.list').onclick = e => {
-        const c = e.target.closest('[data-confirm]'), r = e.target.closest('[data-remove]'), p = e.target.closest('[data-pick]');
-        if (c) { const m = markers.find(x => x.id === c.dataset.confirm); m.confirmed = !m.confirmed; dirty = true; }
-        else if (r) { const id = r.dataset.remove; const mi = markers.findIndex(x => x.id === id); if (mi >= 0) markers.splice(mi, 1); else references.splice(references.findIndex(x => x.id === id), 1); dirty = true; }
-        else if (p) { active = p.dataset.pick; focus(active); }
-        list();
-    };
-    const setSide = () => { const value = Number(sideInput.value) * UNITS[sideUnit.value]; if (value >= 0.05 && value <= 50) { sideM = value; dirty = true; list(); } else document.getElementById('mstatus').textContent = 'Marker size must be between 5 cm and 50 m.'; };
-    sideInput.onchange = setSide; sideUnit.onchange = setSide;
-    document.getElementById('addMarker').onclick = () => { adding = []; measuring = null; list(); };
-    document.getElementById('measure').onclick = () => { measuring = []; adding = null; pendingRef = null; document.getElementById('refForm').hidden = true; list(); };
-    document.getElementById('refCancel').onclick = () => { pendingRef = null; document.getElementById('refForm').hidden = true; list(); };
-    document.getElementById('refAdd').onclick = () => {
-        const metres = Number(document.getElementById('refValue').value) * UNITS[document.getElementById('refUnit').value];
-        if (!(metres > 0) || !pendingRef) { document.getElementById('mstatus').textContent = 'Enter the measured distance.'; return; }
-        active = nextId('D');
-        references.push({id: active, a: pendingRef.a, b: pendingRef.b, metres, label: document.getElementById('refLabel').value.trim(), confirmed: true});
-        pendingRef = null; dirty = true;
-        document.getElementById('refForm').hidden = true; document.getElementById('refValue').value = ''; document.getElementById('refLabel').value = '';
-        list();
-    };
+    v.onClick = p => { if (points.length < 2) { points.push(p); draw(); note(points.length === 2 ? 'Enter the known length, then save calibration.' : 'Click the second endpoint.'); } };
+    v.onDrag = (handle, p) => { points[Number(handle.split(':')[1])] = p; draw(); note('Unsaved changes.'); };
+    document.getElementById('redrawSegment').onclick = () => { points = []; draw(); note('Click the first endpoint.'); };
     document.getElementById('saveMarkers').onclick = async () => {
-        const note = text => { const el = document.getElementById('mstatus'); if (el) el.textContent = text; };
-        try { await api('/api/intake/jobs/' + job.id + '/calibration', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({markers, references, markerSideM: sideM})}); dirty = false; note('Saved. Map geometry is being rebuilt.'); }
-        catch (e) { note(e.message); }
+        const metres = Number(input.value) * UNITS[unit.value];
+        if (points.length !== 2 || refLength({a: points[0], b: points[1]}) <= 2) return note('Select two different endpoints on the preview.');
+        if (!(metres > 0 && metres < 10000)) return note('Enter a known length greater than zero and less than 10,000 m.');
+        reference = {id: 'D1', a: points[0], b: points[1], metres, confirmed: true};
+        try {
+            await api('/api/intake/jobs/' + job.id + '/calibration', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({markers: [], references: [reference]})});
+            delete results.geometry;
+            note('Scale saved. Building your map…');
+        } catch (e) { note(e.message); }
     };
-    list();
+    draw();
+    note(points.length === 2 ? 'Adjust the segment or its known length, then save.' : 'Click the first endpoint.');
 }
 
 // ---- regions and classification (per keyframe)
@@ -549,6 +480,7 @@ function mapView(host, geometry, getFeatures, options = {}) {
     v.redraw = () => {
         const k = v.scale;
         let s = '';
+        if (mode === 'imagery' && geometry.evidence?.shadows && options.shadows?.()) s += '<image href="' + esc(fileUrl(geometry.evidence.shadows) + '?v=' + (geometry.revision || 'initial')) + '" width="' + geometry.mosaic.width + '" height="' + geometry.mosaic.height + '" pointer-events="none"/>';
         if (mode === 'map') {
             const [w, h] = geometry.extent_m, step = w > 200 ? 20 : w > 60 ? 10 : 5;
             const a = toPx([0, 0]), b = toPx([w, h]);
@@ -571,6 +503,8 @@ function mapView(host, geometry, getFeatures, options = {}) {
         }
         v.draw(s);
     };
+    const drawFeatures = v.redraw;
+    if (options.overlay) v.redraw = () => { drawFeatures(); v.overlay.insertAdjacentHTML('beforeend', options.overlay(toPx, v.scale)); };
     v.toPx = toPx; v.toM = toM;
     return v;
 }
@@ -591,14 +525,43 @@ function viewGeometry(body, data) {
 // ---- review & export
 async function viewReview(body, payload) {
     const geometry = await stageData('geometry');
-    if (!geometry.features?.length) { body.innerHTML = '<div class="note warn">Map geometry is not ready. Confirm a marker in Scale calibration first.</div>'; return; }
-    let edits = payload.review?.features || {}, active = null;
-    const kindOptions = kind => ['area', 'line', 'point'].map(g => '<optgroup label="' + g[0].toUpperCase() + g.slice(1) + 's">' + labels.filter(l => l.geometry === g).map(l => '<option value="' + l.kind + '"' + (l.kind === kind ? ' selected' : '') + '>' + esc(l.label) + ' (' + l.kind + ')</option>').join('') + '</optgroup>').join('');
+    if (!geometry.features?.length) { body.innerHTML = '<div class="note warn">Map geometry is not ready. Specify a known segment length in Scale calibration first.</div>'; return; }
+    document.body.classList.add('review-workspace');
+    let edits = payload.review?.features || {}, active = null, reviewPanel = 'review';
+    const staged = job.sceneMode === 'stitched', phase = staged ? payload.review?.phase || 'zones' : 'ready';
+    let outline = [];
+    let marks = [], clickMode = 'select', shadows = false, busy = false, submitting = false;
+    const visible = f => phase === 'zones' ? f.kind !== 'grass' && (f.geometry !== 'point' || f.kind === 'tree') : phase === 'points' ? ['tree', 'bench', 'light'].includes(f.kind) : phase === 'access' ? ['entrance', 'path'].includes(f.kind) : true;
+    const title = {zones: '1 · Review zones and trees', points: '2 · Review benches and lights', access: '3 · Confirm entrances and NPC access', ready: 'Ready to import'}[phase];
+    const options = phase === 'zones' ? ['select', 'building', 'path', 'tree', 'shadow'] : phase === 'points' ? ['select', 'tree', 'bench', 'light', 'remove'] : phase === 'access' ? ['select', 'entrance'] : ['select'];
+    const toolbar = staged ? '<h3>' + title + '</h3><p>' + ({zones: 'Start with rough guidance: drag a general path line, or click building corners and choose Finish outline. Reevaluate to let the model fit visible boundaries; sketches are suggestions, not final answers. Accept the resulting proposals when correct. Use trees and shade to explain hidden path sections.', points: 'Outline one representative bench and one light post: choose the category, click around the object, then Finish outline. SAM 3 uses these examples to search for similar objects when enabled. Reevaluate and review the proposals. Remove dot suppresses an incorrect detection.', access: 'NPC spawn and leave points are only required at scene-edge path ends. Paths ending within 5% of the map boundary extend to the edge. Building entrances are optional. Click the actual door on an accepted building outline. Nearby path ends join it; red circles show optional interior connections. Select a path to drag its end to the correct entrance or scene edge.', ready: 'Zone, point and access review are complete.'}[phase]) + '</p>'
+        + (geometry.pointDetection && phase === 'points' ? '<p class="note">' + esc(geometry.pointDetection) + '</p>' : '')
+        + '<div class="row"><label>Action <select id="clickMode">' + options.map(k => '<option value="' + k + '">' + ({select: 'Select / edit', shadow: 'This is shadow', remove: 'Remove dot', entrance: 'Mark building entrance'}[k] || 'This is ' + label(k).label) + '</option>').join('') + '</select></label><label><input type="checkbox" id="showShadows"> Show candidate shadows</label>'
+        + (['zones', 'points'].includes(phase) ? '<button type="button" id="finishOutline">Finish outline</button><label>Search corridor size <input id="brushSize" type="range" min="8" max="100" value="32"></label>' : '')
+        + (['zones', 'points'].includes(phase) ? '<button type="button" id="reevaluate">Recalculate corrections</button><button type="button" id="undoMark">Undo mark</button><span id="markCount" class="cap">0 corrections</span>' : '') + '</div>'
+        + (geometry.evidence?.note ? '<p class="cap">' + esc(geometry.evidence.note) + '</p>' : '')
+        + '<div class="row"><button type="button" id="approveStep" class="primary"' + (phase === 'ready' ? ' hidden' : '') + '>' + ({zones: 'Zones look right → review dots', points: 'Dots look right → place entrances', access: 'Access looks right → ready for import'}[phase] || '') + '</button>'
+        + (phase !== 'zones' ? '<button type="button" data-back="zones">Return to zones</button>' : '') + (['access', 'ready'].includes(phase) ? '<button type="button" data-back="points">Return to dots</button>' : '') + '</div><p id="pathIssues" class="cap"></p>' : '';
+    const kindOptions = kind => ['area', 'line', 'point'].map(g => '<optgroup label="' + g[0].toUpperCase() + g.slice(1) + 's">' + labels.filter(l => l.geometry === g && !(staged && phase === 'zones' && l.kind === 'grass')).map(l => '<option value="' + l.kind + '"' + (l.kind === kind ? ' selected' : '') + '>' + esc(l.label) + ' (' + l.kind + ')</option>').join('') + '</optgroup>').join('');
     const features = () => S.reviewedFeatures(geometry, edits, labels);
-    body.innerHTML = '<div class="note warn">Model and pipeline output are proposals. Only features you <b>accept</b> are imported. Dashed amber outlines are pending; solid outlines are accepted.</div><div id="rmap"></div>'
-        + '<div class="row" style="margin-top:10px"><button type="button" id="acceptLabelled">Accept all with a model label</button><span class="cap" id="rstatus"></span></div><div class="review-table"><table><thead><tr><th>ID</th><th>Label</th><th>Name</th><th>Approx. size</th><th>Height (m)</th><th>Model</th><th>Flags</th><th>Decision</th></tr></thead><tbody id="rows"></tbody></table></div>'
-        + '<div class="export"><section class="card" id="exportScenario"></section><section class="card" id="export3d"></section></div>';
-    const v = viewer = mapView(document.getElementById('rmap'), geometry, features, {editable: true, active: () => active, hint: 'Select a feature to edit it. Drag white handles to move vertices.'});
+    const pendingFeatures = () => features().filter(f => visible(f) && f.status === 'proposed');
+    body.innerHTML = '<section class="review-workspace-grid"><article class="review-map-panel"><div class="review-map-toolbar" role="toolbar" aria-label="Review map tools">'
+        + '<button type="button" data-map="fit">Fit</button><button type="button" data-map="pan" aria-pressed="false">Pan</button><button type="button" data-map="select" aria-pressed="true">Select</button>'
+        + '<span class="toolbar-divider"></span><span class="cap">' + esc(title) + '</span><button type="button" id="pipelineToggle" aria-expanded="false">Progress</button></div>'
+        + '<div id="rmap"></div><footer class="review-map-status"><span id="rstatus" role="status">Select a feature to review its properties.</span><span>Scroll to zoom · drag to pan · drag vertices to edit</span></footer></article>'
+        + '<aside class="review-controls"><button type="button" id="foldReview" aria-expanded="true" aria-controls="reviewToolBody">Hide tools</button><div id="reviewToolBody"><small class="cap">CONTROL PANEL</small>'
+        + '<nav class="review-tabs" aria-label="Review panels"><button type="button" data-review-tab="review" aria-pressed="true">Review</button><button type="button" data-review-tab="features" aria-pressed="false">Justify</button><button type="button" data-review-tab="export" aria-pressed="false">Export</button></nav>'
+        + '<section data-review-panel="review"><div class="note warn">Only accepted features are imported. Amber dashed outlines are pending; solid outlines are accepted.</div>' + toolbar
+        + '<p>Review each feature in Justify. Choose Yes to accept it or No to reject it and continue.</p><p id="reviewCounts" class="cap"></p></section>'
+        + '<section data-review-panel="features" hidden><h2>Feature properties</h2><p class="review-help">Is this feature correct? Review its properties, then choose Yes or No to submit and continue.</p><button type="button" id="acceptAll">Accept all</button><div class="review-table"><table><tbody id="rows"></tbody></table></div></section>'
+        + '<section data-review-panel="export" hidden><h2>Export</h2><div class="export"><section id="exportScenario"></section><section id="export3d"></section></div></section></div></aside></section>';
+    const v = viewer = mapView(document.getElementById('rmap'), geometry, () => features().filter(f => reviewPanel !== 'features' || f.id === active), {editable: phase !== 'ready' || !staged, active: () => active, shadows: () => shadows,
+        overlay: (toPx, k) => {
+            let markup = outline.length ? '<polyline points="' + pts(outline.map(toPx)) + '" fill="none" stroke="#fff" stroke-width="2" vector-effect="non-scaling-stroke"/>' : '';
+            for (const m of marks) { if (m.outline) { markup += '<polygon points="' + pts(m.outline.map(toPx)) + '" fill="none" stroke="' + label(m.kind).color + '" stroke-width="2" vector-effect="non-scaling-stroke"/>'; continue; } if (m.stroke) { markup += '<polyline points="' + pts(m.stroke.map(toPx)) + '" fill="none" stroke="' + (m.kind === 'shadow' ? '#bc67cf' : label(m.kind).color) + '" stroke-width="' + (2 * m.radius / geometry.scale.m_per_px) + '" stroke-linecap="round" stroke-linejoin="round" opacity=".6" pointer-events="none"/>'; continue; } const q = toPx(m.p); markup += '<circle cx="' + q[0] + '" cy="' + q[1] + '" r="' + 6 * k + '" fill="' + (m.kind === 'shadow' ? '#bc67cf' : label(m.kind).color) + '" stroke="#fff" stroke-width="2" vector-effect="non-scaling-stroke" pointer-events="none"/>'; }
+            if (reviewPanel !== 'features' && phase === 'access') for (const end of S.pathEnds(features(), geometry).filter(e => e.type === 'unresolved')) { const q = toPx(end.p); markup += '<circle cx="' + q[0] + '" cy="' + q[1] + '" r="' + 12 * k + '" fill="none" stroke="#f05252" stroke-width="3" vector-effect="non-scaling-stroke" pointer-events="none"/>'; }
+            return markup;
+        }, hint: 'Choose a category and drag to paint zones. Select / edit lets you pan and adjust features.'});
     let saving = Promise.resolve();
     const save = (id, edit) => {
         edits = {...edits, [id]: {...edits[id], ...edit}};
@@ -608,17 +571,47 @@ async function viewReview(body, payload) {
             .catch(e => { say(e.message); });
     };
     const rows = () => {
-        document.getElementById('rows').innerHTML = features().map(f => '<tr data-row="' + f.id + '" aria-selected="' + (f.id === active) + '" class="' + f.status + '"><td><b>' + f.id + '</b></td>'
-            + '<td><select data-edit="kind" data-id="' + f.id + '">' + kindOptions(f.kind) + '</select>' + (f.predictedKind ? '' : '<span class="cap">no model label</span>') + '</td>'
-            + '<td><input data-edit="name" data-id="' + f.id + '" value="' + esc(f.name) + '"></td>'
-            + '<td>' + (f.size.area_m2 != null ? '≈ ' + f.size.area_m2 + ' m²' : f.size.length_m != null ? '≈ ' + f.size.length_m + ' m long' : '<span class="cap">point</span>') + (f.image ? '<br><span class="cap">' + esc(f.image.source || f.image.frame) + ' · scale ' + esc(f.calibration.id) + ' (' + esc(fmtLength(f.calibration.metres)) + ')</span>' : '') + '</td>'
-            + '<td>' + (f.geometry === 'area' ? '<input data-edit="height" data-id="' + f.id + '" type="number" min="0" step="0.1" placeholder="estimate" value="' + (f.height ?? '') + '">' : '<span class="cap">—</span>') + '</td>'
-            + '<td>' + (f.predictedKind ? esc(label(f.predictedKind).label) + ' · ' + pct(f.confidence) : '—') + '</td><td>' + flags(f.flags, ['conflict', 'label', 'geometry']) + (f.note ? '<br><span class="cap">' + esc(f.note) + '</span>' : '') + '</td>'
-            + '<td><div class="row"><button type="button" data-status="accepted" data-id="' + f.id + '" class="' + (f.status === 'accepted' ? 'primary' : '') + '">Accept</button><button type="button" data-status="rejected" data-id="' + f.id + '"' + (f.status === 'rejected' ? ' style="border-color:#e0705f"' : '') + '>Reject</button></div></td></tr>').join('');
+        document.getElementById('rows').innerHTML = features().filter(f => f.id === active).map(f => '<tr data-row="' + f.id + '" aria-selected="' + (f.id === active) + '" class="' + f.status + '"><td data-field="Feature"><button type="button" data-feature="' + esc(f.id) + '" aria-label="Edit ' + esc(f.name) + '">' + esc(f.name) + '</button><br><span class="cap">' + esc(f.id) + '</span>' + (phase === 'zones' && f.kind === 'building' && f.status === 'accepted' ? '<br>Locked' : '') + '</td>'
+            + '<td data-field="Label"><select data-edit="kind" data-id="' + f.id + '">' + kindOptions(f.kind) + '</select>' + (f.predictedKind ? '' : '<span class="cap">no model label</span>') + '</td>'
+            + '<td data-field="Name"><input data-edit="name" data-id="' + f.id + '" value="' + esc(f.name) + '"></td>'
+            + '<td data-field="Approximate size">' + (f.size.area_m2 != null ? '≈ ' + f.size.area_m2 + ' m²' : f.size.length_m != null ? '≈ ' + f.size.length_m + ' m long' : '<span class="cap">point</span>') + (f.image ? '<br><span class="cap">' + esc(f.image.source || f.image.frame) + ' · scale ' + esc(f.calibration.id) + ' (' + esc(fmtLength(f.calibration.metres)) + ')</span>' : '') + '</td>'
+            + '<td data-field="Height (m)">' + (f.geometry === 'area' ? '<input data-edit="height" data-id="' + f.id + '" type="number" min="0" step="0.1" placeholder="estimate" value="' + (f.height ?? '') + '">' : '<span class="cap">—</span>') + '</td>'
+            + '<td data-field="Model">' + (f.predictedKind ? esc(label(f.predictedKind).label) + ' · ' + pct(f.confidence) : '—') + '</td><td data-field="Flags">' + flags(f.flags, ['conflict', 'label', 'geometry']) + (f.note ? '<br><span class="cap">' + esc(f.note) + '</span>' : '') + '</td>'
+            + '<td data-field="Decision"><div class="row"><button type="button" data-status="accepted" data-id="' + f.id + '" class="' + (f.status === 'accepted' ? 'primary' : '') + '">Yes</button><button type="button" data-status="rejected" data-id="' + f.id + '"' + (f.status === 'rejected' ? ' style="border-color:#e0705f"' : '') + '>No</button></div></td></tr>').join('') || '<tr><td>All features in this step have been reviewed.</td></tr>';
     };
-    function refresh() { rows(); v.redraw(); }
+    function refresh() {
+        const pending = pendingFeatures();
+        const next = pending.find(f => f.id === active) || pending[0];
+        const changed = active !== (next?.id || null);
+        active = next?.id || null;
+        rows(); v.redraw();
+        if (changed && active && reviewPanel === 'features') focusFeature(active);
+        document.getElementById('acceptAll').disabled = busy || submitting || !pending.length || (staged && phase === 'ready');
+        document.getElementById('rstatus').textContent = submitting ? 'Submitting decision…' : next ? 'Review ' + next.name + ' · ' + pending.length + ' remaining' : 'All features in this step have been reviewed.';
+        if (submitting) body.querySelectorAll('[data-edit], [data-status]').forEach(el => { el.disabled = true; });
+        const list = features().filter(visible);
+        document.getElementById('reviewCounts').textContent = list.filter(f => f.status === 'accepted').length + ' accepted · ' + list.filter(f => f.status === 'proposed').length + ' pending · ' + list.filter(f => f.status === 'rejected').length + ' rejected';
+        if (staged && phase === 'ready') body.querySelectorAll('[data-edit], [data-status], #acceptLabelled').forEach(el => { el.disabled = true; });
+        if (document.getElementById('markCount')) document.getElementById('markCount').textContent = marks.length + ' correction(s)';
+        if (document.getElementById('pathIssues')) { const ends = S.pathEnds(features(), geometry).filter(e => e.type === 'unresolved'); document.getElementById('pathIssues').textContent = phase === 'access' ? ends.length + ' unresolved path end(s). Interior path ends may remain; only scene-edge access points are required.' : ''; }
+    }
+    async function action(endpoint, value) {
+        if (busy) return;
+        busy = true; say('Saving and reevaluating…');
+        try {
+            await saving;
+            await api('/api/intake/jobs/' + job.id + '/' + endpoint, {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify(value)});
+            delete results.geometry; delete results.review;
+            await renderPanel();
+        } catch (e) { say(e.message); } finally { busy = false; }
+    }
     async function exports() {
         if (!document.getElementById('exportScenario')) return;   // panel was re-rendered
+        if (staged && phase !== 'ready') {
+            document.getElementById('exportScenario').innerHTML = '<h3>Import after review</h3><p>Finish zones, dots and edge access review before exporting.</p>';
+            document.getElementById('export3d').innerHTML = '';
+            return;
+        }
         const list = features(), accepted = list.filter(f => f.status === 'accepted');
         const pending = list.filter(f => f.status === 'proposed').length, rejected = list.filter(f => f.status === 'rejected').length;
         document.getElementById('exportScenario').innerHTML = '<small class="cap">Import into erfMap</small><h3>' + accepted.length + ' accepted · ' + pending + ' pending · ' + rejected + ' rejected</h3>'
@@ -638,18 +631,81 @@ async function viewReview(body, payload) {
                 + '<p><a class="button primary" href="/api/intake/jobs/' + job.id + '/model.glb">Download .glb</a></p>';
         } catch (e) { panel.innerHTML = '<div class="note err">' + esc(e.message) + '</div>'; }
     }
-    const focusFeature = id => { const f = features().find(x => x.id === id); const p = f.p.map(v.toPx); const xs = p.map(q => q[0]), ys = p.map(q => q[1]); v.focus(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys), f.geometry === 'point' ? 20 : 2.5); };
+    const focusFeature = id => { const f = features().find(x => x.id === id); const p = f.p.map(v.toPx); const xs = p.map(q => q[0]), ys = p.map(q => q[1]); v.ensureVisible(Math.min(...xs), Math.min(...ys), Math.max(...xs), Math.max(...ys)); };
     body.addEventListener('change', e => {
+        if (busy || submitting) return;
+        if (e.target.id === 'clickMode') { v.panOnly = false; body.querySelector('[data-map="pan"]').setAttribute('aria-pressed', 'false'); body.querySelector('[data-map="select"]').setAttribute('aria-pressed', 'true'); outline = []; clickMode = e.target.value; active = null; refresh(); return; }
+        if (e.target.id === 'showShadows') { shadows = e.target.checked; v.redraw(); return; }
         const el = e.target.closest('[data-edit]'); if (!el) return;
         const id = el.dataset.id, field = el.dataset.edit;
         if (field === 'kind') save(id, {kind: el.value, p: null});
         if (field === 'name') save(id, {name: el.value.trim() || undefined});
         if (field === 'height') save(id, {height: el.value === '' ? null : Number(el.value)});
     });
+    function showReviewPanel(name) {
+        reviewPanel = name;
+        if (name === 'review') v.fit();
+        else if (name === 'features' && active) focusFeature(active);
+        v.redraw();
+        body.querySelectorAll('[data-review-panel]').forEach(el => { el.hidden = el.dataset.reviewPanel !== name; });
+        body.querySelectorAll('[data-review-tab]').forEach(el => el.setAttribute('aria-pressed', String(el.dataset.reviewTab === name)));
+        document.getElementById('reviewToolBody').hidden = false;
+        document.getElementById('foldReview').textContent = 'Hide tools';
+        document.getElementById('foldReview').setAttribute('aria-expanded', 'true');
+    }
     body.addEventListener('click', e => {
+        const featureButton = e.target.closest('[data-feature]');
+        if (featureButton) { active = featureButton.dataset.feature; focusFeature(active); refresh(); return; }
+        const tab = e.target.closest('[data-review-tab]');
+        if (tab) { showReviewPanel(tab.dataset.reviewTab); return; }
+        if (e.target.id === 'foldReview') {
+            const tools = document.getElementById('reviewToolBody'); tools.hidden = !tools.hidden;
+            e.target.textContent = tools.hidden ? 'Show tools' : 'Hide tools';
+            e.target.setAttribute('aria-expanded', String(!tools.hidden)); return;
+        }
+        if (e.target.id === 'pipelineToggle') {
+            const open = document.body.classList.toggle('show-review-stages');
+            e.target.setAttribute('aria-expanded', String(open)); return;
+        }
+        const mapTool = e.target.closest('[data-map]');
+        if (mapTool) {
+            if (mapTool.dataset.map === 'fit') v.fit();
+            else {
+                v.panOnly = mapTool.dataset.map === 'pan'; clickMode = 'select';
+                const mode = document.getElementById('clickMode'); if (mode) mode.value = 'select';
+                body.querySelectorAll('[data-map="pan"], [data-map="select"]').forEach(el => el.setAttribute('aria-pressed', String(el === mapTool)));
+                if (v.panOnly) active = null; refresh();
+            }
+            return;
+        }
+        if (e.target.id === 'finishOutline') { if (outline.length < 3) return say('Click at least three corners around the object.'); marks.push({kind: clickMode, p: outline[0], outline, guide: true}); outline = []; refresh(); return; }
+        if (e.target.id === 'undoMark') { if (outline.length) outline.pop(); else marks.pop(); refresh(); return; }
+        if (e.target.id === 'reevaluate') { if (outline.length) return say('Finish or undo the outline first.'); if (!marks.length) { say('Mark at least one correction on the scene.'); return; } action('feedback', {marks}); return; }
+        if (e.target.id === 'approveStep') { if (marks.length || outline.length) { say('Reevaluate or undo your pending corrections first.'); return; } action('review-step', {}); return; }
+        if (e.target.dataset.back) { action('review-step', {back: e.target.dataset.back}); return; }
+        if (busy || submitting) return;
+        if (e.target.id === 'acceptAll') {
+            const accepted = Object.fromEntries(pendingFeatures().map(f => [f.id, {status: 'accepted'}]));
+            if (!Object.keys(accepted).length || (staged && phase === 'ready')) return;
+            submitting = true; refresh();
+            saving = saving.then(() => api('/api/intake/jobs/' + job.id + '/review', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({features: accepted})}))
+                .then(r => { edits = r.review.features; say('All pending features in this step accepted.'); exports(); })
+                .catch(err => { say(err.message); })
+                .finally(() => { submitting = false; refresh(); });
+            return;
+        }
         const s = e.target.closest('[data-status]'), r = e.target.closest('[data-row]');
-        if (s) { const f = features().find(x => x.id === s.dataset.id); save(s.dataset.id, {status: f.status === s.dataset.status ? 'proposed' : s.dataset.status}); return; }
-        if (e.target.id === 'acceptLabelled') { for (const f of features()) if (f.predictedKind && f.status === 'proposed') save(f.id, {status: 'accepted'}); return; }
+        if (s) {
+            const id = s.dataset.id, status = s.dataset.status;
+            if (id !== active) return;
+            submitting = true; refresh();
+            saving = saving.then(() => api('/api/intake/jobs/' + job.id + '/review', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({features: {[id]: {status}}})}))
+                .then(r => { edits = r.review.features; say('Decision saved.'); exports(); })
+                .catch(err => { say(err.message); })
+                .finally(() => { submitting = false; refresh(); });
+            return;
+        }
+        if (e.target.id === 'acceptLabelled') { for (const f of features().filter(visible)) if (!f.kind.startsWith('unknown') && f.status === 'proposed') save(f.id, {status: 'accepted'}); return; }
         if (e.target.id === 'importNow') {
             e.target.disabled = true;
             saving.then(() => api('/api/intake/jobs/' + job.id + '/import', {method: 'POST'})).then(r => {
@@ -661,9 +717,33 @@ async function viewReview(body, payload) {
         }
         if (r && !e.target.closest('input,select,button')) { active = r.dataset.row; focusFeature(active); refresh(); }
     });
-    v.onClick = (p, target) => { const hit = target.closest?.('[data-f]'); if (hit) { active = hit.dataset.f; refresh(); document.querySelector('[data-row="' + active + '"]')?.scrollIntoView({block: 'nearest'}); } };
+    v.onClick = (p, target) => {
+        if (busy || submitting || v.panOnly) return;
+        if (clickMode === 'entrance') { action('entrance', {p: v.toM(p)}); return; }
+        if (['building', 'bench', 'light'].includes(clickMode)) { outline.push(v.toM(p)); refresh(); return; }
+        if (clickMode !== 'select') { if (p[0] >= 0 && p[1] >= 0 && p[0] < geometry.mosaic.width && p[1] < geometry.mosaic.height) { marks.push({kind: clickMode, p: v.toM(p).map(x => +x.toFixed(3)), guide: true}); refresh(); } return; }
+        const hit = target.closest?.('[data-f]'); if (hit && features().some(f => f.id === hit.dataset.f && visible(f))) { active = hit.dataset.f; showReviewPanel('features'); refresh(); document.querySelector('[data-row="' + active + '"]')?.scrollIntoView({block: 'nearest'}); }
+    };
+    let stroke = null;
+    const bounded = p => [Math.max(0, Math.min(geometry.mosaic.width - 1, p[0])), Math.max(0, Math.min(geometry.mosaic.height - 1, p[1]))];
+    v.onStrokeStart = (p, e) => {
+        if (busy || v.panOnly || phase !== 'zones' || ['select', 'building'].includes(clickMode) || e.shiftKey) return false;
+        if (p[0] < 0 || p[1] < 0 || p[0] >= geometry.mosaic.width || p[1] >= geometry.mosaic.height) return false;
+        const q = v.toM(p);
+        stroke = {guide: true, kind: clickMode, p: q, stroke: [q, q], radius: Number(document.getElementById('brushSize').value) * v.scale * geometry.scale.m_per_px / 2};
+        marks.push(stroke); v.redraw(); return true;
+    };
+    v.onStrokeMove = p => {
+        if (!stroke || stroke.stroke.length >= 2000) return;
+        const q = v.toM(bounded(p)), last = stroke.stroke.at(-1);
+        if (Math.hypot(q[0] - last[0], q[1] - last[1]) < stroke.radius / 4) return;
+        stroke.stroke.push(q); v.redraw();
+    };
+    v.onStrokeEnd = p => { v.onStrokeMove(p); stroke = null; refresh(); };
+    v.onStrokeCancel = () => { if (stroke) marks.pop(); stroke = null; refresh(); };
     let dragged = null;
     v.onDrag = (handle, q) => {
+        if (submitting || busy) return;
         const [id, i] = handle.split(':'), f = features().find(x => x.id === id);
         const p = f.p.map(x => [...x]); p[+i] = v.toM(q).map(v => +v.toFixed(3));
         edits = {...edits, [id]: {...edits[id], p}}; dragged = {id, p}; v.redraw();

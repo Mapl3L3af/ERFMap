@@ -162,7 +162,7 @@ function walkingRoutes(site, network, env) {
         if(degree[i]!==1) continue;
         const p=network.nodes[i];
         const building=buildings.find(f=>edges(f.p,true).some(([a,b])=>segmentGap(p,a,b)<=6));
-        if(building) addAccess(p,building.name+' entrance');
+        if(building && !site.accessReviewed) addAccess(p,building.name+' entrance');
     }
     const origins=access, goals=access;
     const sheltered=g=>buildings.some(f=>edges(f.p,true).some(([a,b])=>segmentGap(nodes[g.node],a,b)<=6));

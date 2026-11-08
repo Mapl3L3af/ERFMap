@@ -281,6 +281,31 @@ class BuildingTest(unittest.TestCase):
 
 
 class PathJoinTest(unittest.TestCase):
+    def test_path_ends_within_five_percent_extend_to_exits(self):
+        for axis in (0, 1):
+            for reverse in (False, True):
+                mask = np.zeros((200, 200), bool)
+                mask[2:150, 97:103] = True
+                if reverse:
+                    mask = mask[::-1].copy()
+                if axis:
+                    mask = mask.T.copy()
+                lines, _ = cz.centre_lines(mask, mask.shape)
+                self.assertTrue(lines)
+                points = np.concatenate(lines)
+                self.assertEqual(points[:, 1 - axis].max() if reverse else points[:, 1 - axis].min(), 199 if reverse else 0)
+
+    def test_detected_paths_still_reach_each_border(self):
+        for axis in (0, 1):
+            mask = np.zeros((200, 200), bool)
+            mask[:, 90:110] = True
+            if axis:
+                mask = mask.T.copy()
+            lines, _ = cz.centre_lines(mask, mask.shape)
+            points = np.concatenate(lines)
+            self.assertEqual(points[:, 1 - axis].min(), 0)
+            self.assertEqual(points[:, 1 - axis].max(), 199)
+
     def build(self, edit):
         image, probs = scene()
         probs = probs.copy()
@@ -301,6 +326,16 @@ class PathJoinTest(unittest.TestCase):
         left = [r for r in regions if r.get('model_label') == 'grass' and inside(r['polygon'], 300, 300)]
         right = [r for r in regions if r.get('model_label') == 'grass' and inside(r['polygon'], 1000, 300)]
         self.assertNotEqual(left[0]['polygon'], right[0]['polygon'], 'the joined path still divides the lawn')
+
+    def test_a_path_broken_by_canopy_is_joined(self):
+        def canopy(image, probs):
+            image[200:300, 280:360] = COLOURS['tree']
+            probs[200:300, 280:360] = 0.06
+            probs[200:300, 280:360, cz.CLASSES.index('tree')] = 0.9
+        regions = self.build(canopy)
+        lines = [np.array(r['line']) for r in regions if r.get('model_label') == 'path']
+        self.assertTrue(any(l[:, 1].min() < 300 and l[:, 1].max() > 700
+                            and np.all(np.abs(l[:, 0] - 640) < 15) for l in lines))
 
     def test_paths_that_do_not_point_at_each_other_stay_apart(self):
         lines = [np.array([[100.0, 100.0], [300.0, 100.0]]), np.array([[340.0, 300.0], [340.0, 500.0]])]
@@ -339,12 +374,40 @@ class CouncilTest(unittest.TestCase):
 
     def test_detected_crowns_become_tree_points_and_pull_towards_tree(self):
         image, probs = scene()
-        crowns = [(500.0, 200.0, 0.9, 30.0), (150.0, 300.0, 0.7, 40.0)]
+        crowns = [(500.0, 200.0, 0.9, 30.0), (150.0, 300.0, 0.7, 40.0), (500.0, 640.0, 0.95, 20.0)]
         pulled = cz.add_tree_crowns(probs, crowns)
         self.assertGreater(pulled[200, 500, cz.CLASSES.index('tree')], probs[200, 500, cz.CLASSES.index('tree')] + 0.4)
         trees = [r for r in cz.build_zones(image, pulled, SIZE, trees=crowns) if r['label'] == 'tree']
         self.assertEqual([t['point'] for t in trees], [[1000.0, 400.0], [300.0, 600.0]])
         self.assertEqual([t['confidence'] for t in trees], [0.9, 0.7])
+
+    def test_empty_detector_uses_semantic_crowns(self):
+        image, probs = scene()
+        for detections in ([], [(500, 640, .95, 20)]):
+            trees = [r for r in cz.build_zones(image, probs, SIZE, trees=detections) if r['label'] == 'tree']
+            self.assertTrue(any(np.hypot(r['point'][0]-300, r['point'][1]-600) < 40 for r in trees))
+
+    def test_offset_detector_moves_to_visible_crown_centre(self):
+        image = np.full((140, 140, 3), (60, 150, 70), np.uint8)
+        cv2.circle(image, (75, 70), 24, (30, 80, 30), -1)
+        rng = np.random.default_rng(4)
+        image = np.clip(image.astype(int)+rng.integers(-10, 11, image.shape), 0, 255).astype(np.uint8)
+        crowns = cz.visible_crowns(image, [(63, 70, .9, 40)])
+        self.assertEqual(len(crowns), 1)
+        self.assertLess(np.hypot(crowns[0][0]-75, crowns[0][1]-70), 5)
+
+    def test_bare_trunk_detection_without_canopy_is_omitted(self):
+        image = np.full((100, 100, 3), 120, np.uint8)
+        self.assertEqual(cz.visible_crowns(image, [(50, 50, 0.95, 20)]), [])
+
+    def test_tree_scores_do_not_erase_visible_paving(self):
+        image, probs = scene()
+        # A coarse canopy prediction spills over the clearly visible path.
+        probs[:600, 300:340, cz.CLASSES.index('tree')] = 1.0
+        regions = cz.build_zones(image, probs, SIZE)
+        paths = [r for r in regions if r['label'] == cz.ZONE_KIND['path']]
+        self.assertTrue(paths)
+        self.assertTrue(any(min(q[1] for q in r['line']) < 100 for r in paths))
 
     def test_points_need_one_sure_member_and_report_every_vote(self):
         from PIL import Image

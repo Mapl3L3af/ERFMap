@@ -276,8 +276,6 @@ function draw() {
     multiplayer.paintPlan();
     svg.innerHTML = s;
 }
-function green(f) { return ['grass', 'shrub', 'tree', 'canopy'].includes(f.kind); }
-function displayedAnalysis(){return null;}
 const hints = { 'Select': 'Select and drag vertices or standalone items. Backspace removes the selected vertex, or the feature if no vertex is selected.', 'Draw feature': 'Click to place points. Paths snap to nearby junctions and segments. Finish the shape below.', 'Move vertex': 'Select a feature, then drag a white handle.' };
 function render() {
     $('name').textContent = site.name;
@@ -328,7 +326,7 @@ function render() {
         }
     }
     if (tab === 'Analyse') {
-        const tools=['Elevation map','Real Paths (Desire Paths)','Low visibility (lights)','Trash Can'];
+        const tools=['Land-use quantities','Green space','Elevation map','Real Paths (Desire Paths)','Low visibility (lights)','Trash Can'];
         const picker=analysisTool==='Real Paths (Desire Paths)'
             ? '<label>Analysis layer<select id="analysisLayer">'+tools.map(t=>'<option '+(t===analysisTool?'selected':'')+'>'+esc(t)+'</option>').join('')+'</select></label>'
             : '<h3>Analysis tools</h3>'+tools.map(t=>'<button class="wide '+(analysisTool===t?'active':'')+'" data-analysis-tool="'+esc(t)+'">'+esc(t)+'</button>').join('');
@@ -576,6 +574,7 @@ document.addEventListener('change', async (e) => {
     if(el.id==='personSelect')selectedPerson=Number(el.value);
     if(el.id==='showTrails'){multiplayer.simulationCommand('trails',el.checked);return;}
     if(el.id==='trashSpacing')trashSpacing=Number(el.value);
+
     if (el.id === 'speed'){multiplayer.simulationCommand('speed',+el.value);return;}
     if (el.id === 'confirm' && !view3 && sel >= 0) {
         checkpoint();

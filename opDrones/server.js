@@ -149,10 +149,32 @@ async function route(req,res) {
     else throw failure(405,'Unsupported operation.');
     json({ok:true});
 }
-const server=http.createServer((req,res)=>route(req,res).catch(e=>{
+let stopping = false;
+const server=http.createServer((req,res)=>{
+    if (stopping) { res.writeHead(503); return res.end('Server is stopping.'); }
+    route(req,res).catch(e=>{
     res.writeHead(e.status||500,{'Content-Type':'application/json'});
     res.end(JSON.stringify({error:e.status?e.message:'Could not save or load this project.'}));
-}));
+});
+});
+function shutdown() {
+    if (stopping) return;
+    stopping = true;
+    console.log('Stopping erfMap…');
+    server.close();
+    // Event streams and keep-alive sockets must not hold shutdown open.
+    server.closeAllConnections();
+    for (const room of rooms.values()) {
+        for (const member of room.members.values()) clearTimeout(member.timer);
+        room.members.clear();
+    }
+    intake.stopWorkers();
+    setTimeout(() => {
+        intake.stopWorkers('SIGKILL');
+        process.exit(0);
+    }, 1000);
+}
+for (const signal of ['SIGINT', 'SIGTERM', 'SIGHUP']) process.on(signal, shutdown);
 server.on('error', error => {
     if (error.code === 'EADDRINUSE') {
         console.error('Port ' + (process.env.PORT || 3000) + ' is already in use.');

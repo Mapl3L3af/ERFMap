@@ -34,8 +34,9 @@ except ImportError:  # pragma: no cover - reported through capabilities
     cv2 = None
 
 MARKER_SIDE_M = 0.3048          # 1 ft x 1 ft ground marker
-MAX_FRAMES = 60                 # frames sampled from the video
-FRAME_HEIGHT = 720              # extracted frame height (px)
+VIDEO_CHUNK_SECONDS = 30       # bounded extraction batches, without a whole-video frame cap
+VIDEO_SAMPLE_FPS = 2.0
+FRAME_HEIGHT = 1080              # extracted frame height (px)
 MOSAIC_MAX = 2400               # longest mosaic side (px)
 UNCERTAIN_BELOW = 0.6           # classifier confidence that needs review
 STAGES = ['probe', 'frames', 'correction', 'markers', 'regions', 'classification', 'merging', 'geometry']
@@ -409,16 +410,26 @@ def stage_frames(job):
     video = Path(job) / meta['original']['path']
     probe = stage_result(job, 'probe')['metadata']
     duration = probe.get('duration_s') or 0
-    fps = min(2.0, MAX_FRAMES / duration) if duration else 1.0
+    fps = min(VIDEO_SAMPLE_FPS, probe.get('fps') or VIDEO_SAMPLE_FPS)
     out = stage_dir(job, 'frames')
     for old in out.glob('f*.jpg'):
         old.unlink()
-    progress(.05, 'Extracting frames with FFmpeg at %.2f fps' % fps)
-    cmd = [ffmpeg, '-v', 'error', '-y', '-i', str(video), '-vf', "fps=%.4f,scale=-2:'min(%d,ih)'" % (fps, FRAME_HEIGHT),
-           '-frames:v', str(MAX_FRAMES), '-q:v', '3', str(out / 'f%04d.jpg')]
-    run = subprocess.run(cmd, capture_output=True, text=True)
-    if run.returncode:
-        raise RuntimeError('FFmpeg frame extraction failed: ' + run.stderr.strip()[-400:])
+    # Keep sampling density independent of video length. Each extraction command
+    # covers one bounded section; unknown-duration sources are read through EOF.
+    chunks = max(1, math.ceil(duration / VIDEO_CHUNK_SECONDS)) if duration else 1
+    frame_number = 1
+    for chunk in range(chunks):
+        start = chunk * VIDEO_CHUNK_SECONDS
+        progress(.05 + .25 * chunk / chunks, 'Extracting video section %d of %d at %.2f fps' % (chunk + 1, chunks, fps))
+        cmd = [ffmpeg, '-v', 'error', '-y', '-ss', str(start), '-i', str(video)]
+        if duration:
+            cmd += ['-t', str(min(VIDEO_CHUNK_SECONDS, duration - start))]
+        cmd += ['-vf', "fps=%.6f,scale=-2:'min(%d,ih)'" % (fps, FRAME_HEIGHT),
+                '-start_number', str(frame_number), '-q:v', '2', str(out / 'f%08d.jpg')]
+        run = subprocess.run(cmd, capture_output=True, text=True)
+        if run.returncode:
+            raise RuntimeError('FFmpeg frame extraction failed in section %d: ' % (chunk + 1) + run.stderr.strip()[-400:])
+        frame_number = len(list(out.glob('f*.jpg'))) + 1
     files = sorted(out.glob('f*.jpg'))
     if not files:
         raise RuntimeError('FFmpeg produced no frames from this video.')
@@ -505,7 +516,7 @@ def stage_correction(job):
         progress(.4 * (i + 1) / len(frames), 'Cleaning frame %d of %d' % (i + 1, len(frames)))
 
     photos = (read_json(Path(job) / 'job.json') or {}).get('media') == 'photos'
-    if photos:
+    if photos and (read_json(Path(job) / 'job.json') or {}).get('sceneMode') != 'stitched':
         return photo_sheet(job, out, corrected, lens)
 
     # Planar alignment: chain consecutive-frame homographies to a middle reference frame.
@@ -582,6 +593,8 @@ def stage_correction(job):
             pending.discard(i)
         for i in sorted(pending):
             links.append({'from': corrected[i]['id'], 'to': None, 'inliers': 0, 'ok': False})
+    if photos and len(to_ref) != len(corrected):
+        raise Unavailable('The photos do not all overlap reliably. Add overlapping overhead photos connecting the scene, or remove unrelated photos and start a new intake. No disconnected photos were concatenated into false map positions.')
     corners = np.concatenate([apply_h(to_ref[i], [[0, 0], [corrected[i]['width'], 0], [corrected[i]['width'], corrected[i]['height']], [0, corrected[i]['height']]]) for i in to_ref])
     lo, hi = corners.min(axis=0), corners.max(axis=0)
     span = hi - lo
@@ -838,12 +851,13 @@ def stage_markers(job):
 
 
 # ---------------------------------------------------------------- 4. regions
-def keyframes(job, limit=10):
+def keyframes(job, limit=None):
     corr = stage_result(job, 'correction')
+    if (read_json(Path(job) / 'job.json') or {}).get('sceneMode') == 'stitched':
+        m = corr['mosaic']
+        return [{'id': 'scene', 'after': m['image'], 'width': m['width'], 'height': m['height'], 'to_mosaic': np.eye(3).tolist()}]
     frames = [f for f in corr['frames'] if 'to_mosaic' in f]
-    if corr.get('layout') == 'sheet':
-        limit = 60
-    if len(frames) <= limit:
+    if limit is None or len(frames) <= limit:
         return frames
     step = (len(frames) - 1) / (limit - 1)
     return [frames[round(i * step)] for i in range(limit)]
@@ -899,7 +913,7 @@ def stage_regions(job):
     regions, model = [], None
     if segmenter:
         progress(.1, 'Mapping zones and points with the model council (up to a minute per photo)' if builtin else 'Running external segmenter')
-        reply = external(segmenter, {'job': str(Path(job).resolve()), 'frames': [{'id': f['id'], 'image': str((Path(job) / f['after']).resolve())} for f in frames]}, 'Segmenter')
+        reply = external(segmenter, {'job': str(Path(job).resolve()), 'phase': 'zones', 'frames': [{'id': f['id'], 'image': str((Path(job) / f['after']).resolve())} for f in frames]}, 'Segmenter')
         model = reply.get('model')
         for r in reply.get('regions', []):
             if r.get('frame') in {f['id'] for f in frames} and len(r.get('polygon', [])) >= 3:
@@ -916,8 +930,17 @@ def stage_regions(job):
     for n, r in enumerate(regions):
         r['id'] = 'R%d' % (n + 1)
     warnings = [] if segmenter else ['Regions come from colour clustering, which splits shadows and merges similar-looking surfaces. Install the free CLIP model (pip install open_clip_torch) or configure ERFMAP_SEGMENTER.']
+    evidence = None
+    if len(frames) == 1 and frames[0]['id'] == 'scene':
+        from adapters.clip_zones import shadow_mask
+        image = imread(Path(job) / frames[0]['after'])
+        mask = shadow_mask(image)
+        overlay = np.zeros((*mask.shape, 4), np.uint8)
+        overlay[mask] = (220, 90, 180, 150)
+        cv2.imwrite(str(out / 'shadows.png'), overlay)
+        evidence = {'shadows': rel(job, out / 'shadows.png'), 'note': 'Candidate shadows from local brightness contrast. Dark roofs and asphalt may also be marked; this is not a sun-position model.'}
     return {'status': 'complete' if regions else 'needs_review', 'summary': '%d candidate regions in %d keyframes' % (len(regions), len(frames)),
-            'method': method, 'model': model, 'keyframes': [{'id': f['id'], 'image': f['after'], 'width': f['width'], 'height': f['height']} for f in frames], 'regions': regions, 'warnings': warnings}
+            'method': method, 'model': model, 'evidence': evidence, 'keyframes': [{'id': f['id'], 'image': f['after'], 'width': f['width'], 'height': f['height']} for f in frames], 'regions': regions, 'warnings': warnings}
 
 
 # ---------------------------------------------------------------- 5. classification
@@ -1087,6 +1110,7 @@ def stage_merging(job):
     cls = stage_result(job, 'classification')
     preds = {p['id']: p for p in cls['predictions']}
     to_mosaic = {f['id']: f['to_mosaic'] for f in corr['frames'] if 'to_mosaic' in f}
+    to_mosaic['scene'] = np.eye(3).tolist()
     W, H = corr['mosaic']['width'], corr['mosaic']['height']
     s = min(1.0, 900 / max(W, H))          # masks at reduced resolution
     size = (int(W * s) + 1, int(H * s) + 1)
@@ -1387,7 +1411,7 @@ def stage_geometry(job):
     return {'status': 'needs_review', 'summary': '%d proposed features at %.4f m per mosaic pixel from %d marker(s) and %d measured distance(s)' % (len(features), m_per_px, len(confirmed), len(references)),
             'scale': {'m_per_px': m_per_px, 'markers': len(confirmed), 'references': len(references), 'spread': spread, 'per_marker': per_marker, 'per_reference': per_reference,
                       'origin_px': (origin / m_per_px).tolist(), 'marker_side_m': side_m},
-            'extent_m': extent, 'mosaic': merged['mosaic'], 'features': features, 'warnings': warnings}
+            'extent_m': extent, 'mosaic': merged['mosaic'], 'features': features, 'evidence': stage_result(job, 'regions').get('evidence'), 'warnings': warnings}
 
 
 RUNNERS = {'probe': stage_probe, 'frames': stage_frames, 'correction': stage_correction, 'markers': stage_markers,

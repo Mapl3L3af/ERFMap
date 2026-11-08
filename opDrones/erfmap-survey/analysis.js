@@ -105,6 +105,8 @@ function analysisTrashOverlay(site, maxSpacing, scale, project, line, circle) {
     return output.join('');
 }
 function analysisDetailsMarkup(tool, site, spacing) {
+    const design = designAnalysisDetails(tool, site);
+    if (design !== null) return design;
     if (tool === 'Real Paths (Desire Paths)') return realPathPanel();
     if (tool === 'Elevation map') {
         if (!site.samples.length) return '<p class="note">No elevation samples are available. Import ground elevations to build the heat map and profile graph.</p>';
@@ -182,4 +184,29 @@ function realPathPanel(){
         +'<p><b style="color:#167485">Teal</b> follows confirmed paths. <b style="color:#bf5026">Orange</b> shows shortcuts outside them. Thicker lines mark repeated passages.</p>'
         +(realPathMode==='walked'&&!r.total?'<p>Run the pedestrian simulation to record walking.</p>':'')
         +environmentControls();
+}
+
+function designAnalysisDetails(tool, site) {
+    const metric = (label, value) => '<div class="row"><span>' + label + '</span><b>' + value + '</b></div>';
+    const fmt = n => n.toLocaleString(undefined, {maximumFractionDigits: 1});
+    const sumArea = kinds => site.features.filter(f => kinds.includes(f.kind) && f.p.length >= 3).reduce((n, f) => n + area(f.p), 0);
+    if (tool === 'Land-use quantities' || tool === 'Green space') {
+        const total = site.w * site.h;
+        const quantity = (label, value) => metric(label, fmt(value) + ' m²' + (total ? ' · ' + fmt(100 * value / total) + '%' : ''));
+        let h = '<h3>' + tool + '</h3>' + quantity('Site area', total);
+        if (tool === 'Land-use quantities') {
+            h += quantity('Building footprints', sumArea(['building'])) + quantity('Road and pavement polygons', sumArea(['road', 'pavement'])) + quantity('Water', sumArea(['water'])) + quantity('Planted ground', sumArea(['grass', 'shrub']));
+            const length = kind => site.features.filter(f => kind.includes(f.kind)).reduce((n, f) => n + edges(f.p).reduce((v, [a,b]) => v + dist(a,b), 0), 0);
+            h += metric('Confirmed walkways', fmt(lengthForPaths(site)) + ' m') + metric('Fence length', fmt(length(['fence'])) + ' m');
+        } else {
+            const trees = site.features.filter(f => f.kind === 'tree').length;
+            h += quantity('Planted ground', sumArea(['grass', 'shrub'])) + quantity('Mapped canopy', sumArea(['canopy'])) + quantity('Green roofs', sumArea(['greenroof'])) + metric('Trees', trees) + metric('Trees per hectare', total ? fmt(trees * 10000 / total) : '—');
+        }
+        return h + '<p class="note">Areas are sums of mapped polygons; overlapping features are counted separately. Percentages use the rectangular site extent. Tree points do not imply canopy area.</p>';
+    }
+    return null;
+}
+
+function lengthForPaths(site) {
+    return analysisWalkablePaths(site).reduce((n,f)=>n+edges(f.p).reduce((v,[a,b])=>v+dist(a,b),0),0);
 }

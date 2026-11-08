@@ -2,7 +2,7 @@
 """Two-stage zero-shot labelling with CLIP: zone polygons, then point features.
 
 Stage 1, zones. A grid of overlapping windows is scored by CLIP as building,
-path, road, grass or tree. The scores are smoothed with an edge-aware filter so
+path, road or tree. Grass is assigned to the remaining ground after zone review. The scores are smoothed with an edge-aware filter so
 zone edges follow visible edges in the photo, then zones are assigned in priority order:
 
   1. buildings are reserved first;
@@ -40,7 +40,6 @@ PROMPTS = {
     'building': ['a building roof', 'a rooftop', 'a house roof'],
     'path': ['a concrete sidewalk', 'a paved footpath', 'a walkway'],
     'road': ['an asphalt road', 'a parking lot', 'asphalt pavement'],
-    'grass': ['grass', 'a lawn', 'mowed grass'],
     'tree': ['a tree canopy', 'tree branches', 'a tree'],
 }
 POINTS = {
@@ -122,6 +121,60 @@ def vegetation(image):
     k = np.ones((5, 5), np.uint8)
     veg = cv2.morphologyEx(cv2.morphologyEx(veg, cv2.MORPH_OPEN, k), cv2.MORPH_CLOSE, k)
     return veg > 0
+
+
+def crown_center(image, mask, x, y, radius):
+    """Find the interior of the local crown, separating foliage from nearby lawn.
+
+    Colour is measured near the proposal, so dark crowns need not share a global
+    brightness threshold. Distance to the boundary keeps points off branches and
+    crown edges; a proximity term prevents jumping to a neighbouring tree.
+    """
+    h, w = mask.shape
+    radius = max(3, float(radius))
+    x0, x1 = max(0, int(x-radius)), min(w, int(x+radius)+1)
+    y0, y1 = max(0, int(y-radius)), min(h, int(y+radius)+1)
+    if x0 >= x1 or y0 >= y1:
+        return float(x), float(y)
+    yy, xx = np.ogrid[y0:y1, x0:x1]
+    distance = (xx-x)**2 + (yy-y)**2
+    local = mask[y0:y1, x0:x1] & (distance <= radius**2)
+    lab = cv2.cvtColor(image[y0:y1, x0:x1], cv2.COLOR_BGR2LAB).astype(np.float32)
+    seed = local & (distance <= (radius*.3)**2)
+    if seed.any():
+        colour = np.median(lab[seed], axis=0)
+        delta = np.linalg.norm(lab-colour, axis=2)
+        similar = local & (delta <= max(15, float(np.percentile(delta[seed], 90))*2))
+        if similar.sum() >= max(9, local.sum()*.15):
+            local = similar
+    depth = cv2.distanceTransform(np.pad(local.astype(np.uint8), 1), cv2.DIST_L2, 5)[1:-1, 1:-1]
+    if not depth.any():
+        return float(x), float(y)
+    score = depth / (1 + distance / radius**2)
+    cy, cx = np.unravel_index(np.argmax(score), score.shape)
+    return float(x0+cx), float(y0+cy)
+
+
+def visible_crowns(image, crowns, refine=True):
+    """Require visible foliage within a detector crown; bare trunks are not trees."""
+    foliage = vegetation(image)
+    h, w = foliage.shape
+    kept = []
+    for x, y, confidence, radius in crowns:
+        if not all(np.isfinite(v) for v in (x, y, confidence, radius)) or radius <= 0:
+            continue
+        x0, x1 = max(0, int(x - radius)), min(w, int(x + radius) + 1)
+        y0, y1 = max(0, int(y - radius)), min(h, int(y + radius) + 1)
+        if x1 <= x0 or y1 <= y0:
+            continue
+        yy, xx = np.ogrid[y0:y1, x0:x1]
+        disk = (xx - x) ** 2 + (yy - y) ** 2 <= radius ** 2
+        gray = cv2.cvtColor(image[y0:y1, x0:x1], cv2.COLOR_BGR2GRAY)
+        texture = float(gray[disk].std()) if disk.any() else 0
+        if confidence >= TREE_MIN and disk.any() and foliage[y0:y1, x0:x1][disk].mean() >= 0.55 and texture >= 4:
+            cx, cy = crown_center(image, foliage, x, y, radius) if refine else (x, y)
+            kept.append((cx, cy, confidence, radius))
+    return kept
 
 
 def frame_edges(image, bare):
@@ -350,19 +403,13 @@ def centre_lines(piece, frame_size):
         line = fit_polyline(chain, max(2.0, width / 2))
         if line is None:
             continue
-        for end, inner in ((0, 1), (-1, -2)):                  # reach the edge where the path leaves the photo
-            q, d = line[end], line[end] - line[inner]
-            n = np.hypot(*d)
-            if n < 1e-6:
-                continue
-            d = d / n
-            reach = width
-            ahead = q + d * reach
-            if not (0 <= ahead[0] < w and 0 <= ahead[1] < h):
-                ts = [t for t in ((-q[0]) / d[0] if d[0] < 0 else (w - 1 - q[0]) / d[0] if d[0] > 0 else np.inf,
-                                  (-q[1]) / d[1] if d[1] < 0 else (h - 1 - q[1]) / d[1] if d[1] > 0 else np.inf) if t >= 0]
-                if ts:
-                    line[end] = q + d * min(ts)
+        for end in (0, -1):
+            q = line[end]
+            candidates = [(q[0] / w, 0, 0), ((w - 1 - q[0]) / w, 0, w - 1),
+                          (q[1] / h, 1, 0), ((h - 1 - q[1]) / h, 1, h - 1)]
+            distance, axis, edge = min(candidates)
+            if distance <= 0.05:
+                line[end, axis] = edge
         out.append(line)
     return out, width
 
@@ -429,7 +476,15 @@ def polygons(mask, scale, size, tol):
     return out
 
 
-def build_zones(image, probs, size, trees=None, votes=None):
+def shadow_mask(image):
+    """Candidate shade from local luminance contrast; dark roofs/asphalt can also trigger it."""
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB).astype(np.float32)
+    light = lab[:, :, 0]
+    surround = cv2.GaussianBlur(light, (0, 0), max(3, max(light.shape) / 35))
+    return (light < 0.72 * np.maximum(surround, 1)) & (light < np.percentile(light, 45))
+
+
+def build_zones(image, probs, size, trees=None, votes=None, locked_buildings=None, forced_masks=None, occlusion_mask=None):
     """Zones and tree points from per-pixel class probabilities.
 
     image: work-size BGR image. probs: HxWxC in CLASSES order (the council's combined vote).
@@ -443,6 +498,18 @@ def build_zones(image, probs, size, trees=None, votes=None):
     probs = snap_to_edges(image, probs, max(4, block // 6))
     b, pth, rd, gr, tr = (probs[:, :, CLASSES.index(c)] for c in CLASSES)
     best = probs.max(axis=2)
+    canopy = (tr >= PRIORITY * best) & vegetation(image)
+    if trees is not None:
+        trees = visible_crowns(image, trees)
+        # Crown detections also explain gaps in paths, even when pixel votes disagree.
+        for x, y, confidence, radius in trees:
+            crown_mask = np.zeros((h, w), np.uint8)
+            cv2.circle(crown_mask, (round(x), round(y)), max(1, round(radius)), 1, -1)
+            canopy |= crown_mask > 0
+    shadows = shadow_mask(image)
+    occluded = canopy | shadows
+    if occlusion_mask is not None:
+        occluded |= occlusion_mask
     # Green pixels are grass or trees, whatever the coarse scores say: paving and roofs are never green.
     # On bare ground the models choose between building, path and road, and are trusted more readily.
     bare = ~vegetation(image)
@@ -455,9 +522,9 @@ def build_zones(image, probs, size, trees=None, votes=None):
         piece = comp == c
         if piece.sum() >= 4 * MIN_ZONE * h * w and b[piece].mean() >= FRAME_LEAN * best[piece].mean() and framed(piece, edges, (h, w)):
             building |= piece
-    # Where a tree crown is the best match, the ground under it is left to grass (the tree becomes a point),
-    # so tree shadows and canopies are not mistaken for road.
-    line = bare & ~building & (np.maximum(pth, rd) >= PAVED * best) & (tr < best)
+    # Visible paving remains eligible even if coarse tree scores dominate nearby.
+    # Canopy gaps are handled separately by the path continuity checks.
+    line = bare & ~building & (np.maximum(pth, rd) >= PAVED * best)
     path = line & (pth >= rd)
     road = line & (rd > pth)
 
@@ -490,6 +557,15 @@ def build_zones(image, probs, size, trees=None, votes=None):
         return keep[comp]
 
     building, path, road = drop_small(building), drop_small(path), drop_small(road)
+    for kind, mask in (forced_masks or []):
+        if kind in ('grass', 'path', 'tree'):
+            building &= ~mask
+            road &= ~mask
+            path &= ~mask
+        if kind == 'building':
+            building |= mask
+        elif kind == 'path':
+            path |= mask
     # Buildings are right-angled: replace each traced outline with straight, square-cornered sides.
     squared = []
     count, comp = cv2.connectedComponents(building.astype(np.uint8))
@@ -504,9 +580,12 @@ def build_zones(image, probs, size, trees=None, votes=None):
         cv2.fillPoly(filled, [np.round(corners).astype(np.int32)], 1)
         building |= filled > 0
         squared.append((filled > 0, corners))
+    if locked_buildings is not None:
+        building |= locked_buildings.astype(bool)
+        squared = []
     path &= ~building
     road &= ~building
-    path_shapes, path = path_lines(path, building, scale, size, max(1.0, 0.002 * max(h, w)))
+    path_shapes, path = path_lines(path, building, scale, size, max(1.0, 0.002 * max(h, w)), occluded, image)
     road &= ~path
     grass = ~(building | path | road)
     tol = max(1.0, 0.002 * max(h, w))
@@ -542,12 +621,12 @@ def build_zones(image, probs, size, trees=None, votes=None):
             region['votes'] = said
         regions.append(region)
 
-    if trees is not None:                 # a tree detector found the crowns
+    if trees:                             # usable detector crowns take precedence
         for x, y, conf, r in trees:
             regions.append(point_region(x / scale, y / scale, 'tree', conf, 2 * r / scale))
         return regions
     # Trees: one point per crown, wherever trees dominate (usually over grass).
-    tree = (tr >= PRIORITY * best) & ~bare
+    tree = (tr >= 0.5) & (tr >= 1.5 * np.maximum.reduce([b, pth, rd, gr])) & ~bare
     tree = cv2.morphologyEx(tree.astype(np.uint8), cv2.MORPH_OPEN, small)
     crown = max(8, block // 2)
     # Pad with background first: otherwise OpenCV treats the photo edge as far from any edge,
@@ -560,7 +639,14 @@ def build_zones(image, probs, size, trees=None, votes=None):
         if all((x - tx) ** 2 + (y - ty) ** 2 >= crown * crown for tx, ty in taken):
             taken.append((x, y))
     for x, y in taken:
-        regions.append(point_region(x / scale, y / scale, 'tree', float(probs[y, x, CLASSES.index('tree')]), crown / scale))
+        patch = cv2.cvtColor(image[max(0, y-crown//2):y+crown//2+1, max(0, x-crown//2):x+crown//2+1], cv2.COLOR_BGR2GRAY)
+        if patch.std() < 4:  # Uniform lawn is not a crown, even when coarse semantics say tree.
+            continue
+        cx, cy = crown_center(image, tree > 0, x, y, max(crown, float(dist[y, x])*1.5))
+        if any(np.hypot(cx / scale-r['point'][0], cy / scale-r['point'][1]) < crown / scale
+               for r in regions if r.get('label') == 'tree'):
+            continue
+        regions.append(point_region(cx / scale, cy / scale, 'tree', float(probs[round(cy), round(cx), CLASSES.index('tree')]), 2 * float(dist[y, x]) / scale))
     return regions
 
 
@@ -575,7 +661,7 @@ def ends_of(line):
     return out
 
 
-def connect_paths(lines, widths, blocked, frame_size):
+def connect_paths(lines, widths, blocked, frame_size, occluded=None, colours=None):
     """Paths rarely just stop: shade, a tree or a coarse score often breaks one path in two.
     Ends that point at each other are joined into one line (greedily, closest first), and an end
     that points at the side of another path is carried on to meet it. Gaps never cross a building.
@@ -584,6 +670,12 @@ def connect_paths(lines, widths, blocked, frame_size):
     reach = JOIN_REACH * max(h, w)
     at_edge = lambda q: q[0] <= 2 or q[1] <= 2 or q[0] >= w - 3 or q[1] >= h - 3
     lines, widths = [l.copy() for l in lines], list(widths)
+    colours = [np.asarray(c, float) for c in colours] if colours is not None else None
+    def compatible(i, j):
+        if colours is None:
+            return True
+        delta = colours[i] - colours[j]
+        return np.linalg.norm(delta[1:]) <= 30 and abs(delta[0]) <= 70
 
     def clear(a, b, width):
         stroke = np.zeros((h, w), np.uint8)
@@ -605,7 +697,13 @@ def connect_paths(lines, widths, blocked, frame_size):
                             continue
                         gap = qj - qi
                         d = np.hypot(*gap)
-                        if (d <= reach and facing(ui, gap) and facing(uj, -gap) and (best is None or d < best[0])
+                        permitted = reach
+                        if occluded is not None and d <= 2 * reach:
+                            stroke = np.zeros((h, w), np.uint8)
+                            cv2.line(stroke, tuple(np.round(qi).astype(int)), tuple(np.round(qj).astype(int)), 1, max(1, round(min(widths[i], widths[j]))))
+                            if stroke.any() and occluded[stroke > 0].mean() >= 0.5:
+                                permitted = 2 * reach
+                        if (d <= permitted and compatible(i, j) and max(widths[i], widths[j]) <= 2.5 * max(1, min(widths[i], widths[j])) and facing(ui, gap) and facing(uj, -gap) and (best is None or d < best[0])
                                 and (tuple(np.round(qi)), tuple(np.round(qj))) not in refused):
                             best = (d, i, ei, j, ej)
         if best is None:
@@ -619,6 +717,9 @@ def connect_paths(lines, widths, blocked, frame_size):
             continue
         bridges.append((a[-1].copy(), b[0].copy(), width))
         joined, wj = np.concatenate([a, b]), width
+        if colours is not None:
+            colour = (colours[i] + colours[j]) / 2
+            colours = [c for k, c in enumerate(colours) if k not in (i, j)] + [colour]
         lines = [l for k, l in enumerate(lines) if k not in (i, j)] + [joined]
         widths = [x for k, x in enumerate(widths) if k not in (i, j)] + [wj]
     for i, line in enumerate(lines):                          # 2. end to the side of another path
@@ -627,7 +728,7 @@ def connect_paths(lines, widths, blocked, frame_size):
                 continue
             hit = None
             for j, other in enumerate(lines):
-                if j == i:
+                if j == i or not compatible(i, j):
                     continue
                 for p1, p2 in zip(other[:-1], other[1:]):
                     A = np.array([u, p1 - p2]).T
@@ -642,20 +743,24 @@ def connect_paths(lines, widths, blocked, frame_size):
     return lines, widths, bridges
 
 
-def path_lines(path, blocked, scale, size, tol):
+def path_lines(path, blocked, scale, size, tol, occluded=None, image=None):
     """Every path in a photo as centre-line segments, with breaks joined (see connect_paths).
     Each line gets the part of the path area closest to it, so pieces never overlap.
     Returns the shapes and the path area including the filled gaps."""
     h, w = path.shape
     lines, widths = [], []
+    colours = [] if image is not None else None
+    lab = cv2.cvtColor(image, cv2.COLOR_BGR2LAB) if image is not None else None
     count, comp = cv2.connectedComponents(path.astype(np.uint8))
     for c in range(1, count):
         found, width = centre_lines(comp == c, (h, w))
         lines += found
         widths += [width] * len(found)
+        if colours is not None:
+            colours += [np.median(lab[comp == c], axis=0)] * len(found)
     if not lines:
         return [], path
-    lines, widths, bridges = connect_paths(lines, widths, blocked, (h, w))
+    lines, widths, bridges = connect_paths(lines, widths, blocked, (h, w), occluded, colours)
     path = path.copy()
     for a, b, width in bridges:
         stroke = np.zeros((h, w), np.uint8)
@@ -691,9 +796,9 @@ def point_region(x, y, label, confidence, size):
 #   deepforest tree crowns, trained on aerial and drone imagery                 (deepforest)
 # Zone scores are a weighted average per pixel. A member only counts where its
 # own labels are ones we map (SegFormer saying "sky" or "water" does not vote).
-WEIGHTS = {'clip': 1.0, 'segformer': 1.0}
+WEIGHTS = {'clip': 1.0, 'segformer': 1.0, 'sam3': 2.0}
 TREE_WEIGHT = 0.6         # how strongly a DeepForest crown pulls its pixels towards "tree"
-TREE_MIN = 0.3            # DeepForest boxes below this score are ignored
+TREE_MIN = 0.65            # DeepForest boxes below this score are ignored
 SYNONYMS = {              # label names of scene models (ADE20K, aerial datasets) -> our classes
     'building': {'building', 'edifice', 'house', 'skyscraper', 'roof', 'hut', 'hovel', 'shack', 'tower', 'garage'},
     'road': {'road', 'route', 'car', 'auto', 'automobile', 'runway', 'parking', 'parking lot', 'impervious surfaces', 'impervious surface'},
@@ -759,7 +864,8 @@ class Clip:
         self.tokenizer = open_clip.get_tokenizer(name)
         self.model.eval()
         torch.set_grad_enabled(False)
-        self.zone_text = self.embed([PROMPTS[c] for c in CLASSES])
+        self.zone_classes = [c for c in CLASSES if c != 'grass']
+        self.zone_text = self.embed([PROMPTS[c] for c in self.zone_classes])
         self.point_kinds = list(POINTS)
         self.point_text = torch.cat([self.embed([POINTS[k] for k in self.point_kinds]), self.zone_text])
 
@@ -793,6 +899,10 @@ class Clip:
         boxes = [(x, y) for y in ys for x in xs]
         pad = P // 4
         probs = self.score([image.crop((max(0, x - pad), max(0, y - pad), min(W, x + P + pad), min(H, y + P + pad))) for x, y in boxes], self.zone_text)
+        classified = probs
+        probs = np.zeros((len(boxes), len(CLASSES)), np.float32)
+        for i, kind in enumerate(self.zone_classes):
+            probs[:, CLASSES.index(kind)] = classified[:, i]
         acc = np.zeros((H, W, len(CLASSES)), np.float32)
         hits = np.zeros((H, W, 1), np.float32)
         for (x, y), p in zip(boxes, probs):
@@ -853,6 +963,7 @@ class SegFormer:
     def zones(self, image):
         self.raw = self.probabilities(image)
         mapped = np.stack([self.raw[:, :, ids].sum(axis=2) if ids else np.zeros(self.raw.shape[:2], np.float32) for ids in (self.zone_ids[c] for c in CLASSES)], axis=2)
+        mapped[:, :, CLASSES.index('grass')] = 0
         mass = mapped.sum(axis=2)
         return mapped / np.maximum(mass, 1e-6)[:, :, None], mass
 
@@ -922,10 +1033,86 @@ def council_points(image, members, f):
     return kept
 
 
+class Sam3:
+    """Optional concept segmentation, including site-specific box exemplars."""
+    name = 'sam3'
+
+    def __init__(self):
+        import torch
+        from transformers import Sam3Model, Sam3Processor
+        self.torch = torch
+        name = os.environ.get('ERFMAP_SAM3_MODEL', 'facebook/sam3')
+        self.model = Sam3Model.from_pretrained(name)
+        device = 'cuda' if torch.cuda.is_available() else 'mps' if torch.backends.mps.is_available() else 'cpu'
+        self.model.to(device).eval()
+        self.processor = Sam3Processor.from_pretrained(name)
+        self.label = 'SAM 3 ' + name
+        self.guidance = []
+
+    def predict(self, image, kind):
+        boxes = []
+        for mark in self.guidance:
+            if mark['kind'] != kind or not mark.get('outline'):
+                continue
+            pts = np.asarray(mark['outline'], float)
+            boxes.append([*pts.min(axis=0), *pts.max(axis=0)])
+        args = {'images': image, 'text': {'building': 'building roof', 'path': 'footpath', 'road': 'road', 'tree': 'tree canopy', 'bench': 'park bench', 'light': 'lamp post'}[kind], 'return_tensors': 'pt'}
+        if boxes:
+            args.update(input_boxes=[boxes], input_boxes_labels=[[1] * len(boxes)])
+        inputs = self.processor(**args).to(self.model.device)
+        with self.torch.no_grad():
+            outputs = self.model(**inputs)
+        result = self.processor.post_process_instance_segmentation(outputs, threshold=.65 if kind == 'tree' else .5, mask_threshold=.5, target_sizes=inputs['original_sizes'].tolist())[0]
+        return result['masks'].detach().cpu().numpy(), result['scores'].detach().cpu().numpy()
+
+    def zones(self, image):
+        W, H = image.size
+        out = np.zeros((H, W, len(CLASSES)), np.float32)
+        out[:, :, CLASSES.index('grass')] = .15
+        for kind in ('building', 'path', 'road', 'tree'):
+            masks, scores = self.predict(image, kind)
+            for mask, score in zip(masks, scores):
+                out[:, :, CLASSES.index(kind)] = np.maximum(out[:, :, CLASSES.index(kind)], mask * score)
+        return out / np.maximum(out.sum(axis=2, keepdims=True), 1e-6), np.ones((H, W), np.float32)
+
+    def points(self, image):
+        W, H = image.size
+        out = {k: np.zeros((H, W), np.float32) for k in POINTS}
+        for kind in POINTS:
+            masks, scores = self.predict(image, kind)
+            for mask, score in zip(masks, scores):
+                out[kind] = np.maximum(out[kind], mask * score)
+        return out
+
+
+def apply_guidance(pixel, marks, factor):
+    """A rough sketch biases evidence locally; it never forces the resulting boundary."""
+    out = pixel.copy()
+    h, w = pixel.shape[:2]
+    for mark in marks:
+        kind = mark['kind']
+        if kind not in CLASSES:
+            continue
+        mask = np.zeros((h, w), np.uint8)
+        points = np.round(np.asarray(mark.get('outline') or mark.get('stroke') or [mark['p']]) * factor).astype(np.int32)
+        radius = max(3, round(mark.get('radius', 12) * factor))
+        if mark.get('outline'):
+            cv2.fillPoly(mask, [points], 1)
+        elif len(points) > 1:
+            cv2.polylines(mask, [points], False, 1, 2 * radius)
+        else:
+            cv2.circle(mask, tuple(points[0]), radius, 1, -1)
+        influence = cv2.GaussianBlur(mask.astype(np.float32), (0, 0), max(2, radius / 2))
+        k = CLASSES.index(kind)
+        # Only amplify existing model evidence. A contradicted sketch cannot invent a roof/path.
+        out[:, :, k] *= 1 + 1.5 * influence
+    return out / np.maximum(out.sum(axis=2, keepdims=True), 1e-6)
+
+
 def load_members():
     members, notes = [], []
-    for cls, env in ((Clip, 'ERFMAP_CLIP'), (SegFormer, 'ERFMAP_SEGFORMER'), (DeepForest, 'ERFMAP_DEEPFOREST')):
-        if os.environ.get(env, '').lower() == 'off':
+    for cls, env in ((Sam3, 'ERFMAP_SAM3'), (Clip, 'ERFMAP_CLIP'), (SegFormer, 'ERFMAP_SEGFORMER'), (DeepForest, 'ERFMAP_DEEPFOREST')):
+        if (cls is Sam3 and os.environ.get(env, '').lower() != 'on') or os.environ.get(env, '').lower() == 'off':
             notes.append('%s turned off' % cls.name)
             continue
         try:
@@ -960,21 +1147,40 @@ def main():
         votes, weighted = {}, {}
         for m in members:
             if m.name in WEIGHTS:
+                if isinstance(m, Sam3):
+                    m.guidance = [{**g, 'outline': (np.asarray(g['outline']) * f).tolist()} if g.get('outline') else g for g in request.get('guidance', [])]
                 probs, w = m.zones(image)
                 votes[m.name] = probs
                 weighted[m.name] = (probs, w * WEIGHTS[m.name])
-        pixel = combine(weighted, (H, W))
+        pixel = apply_guidance(combine(weighted, (H, W)), request.get('guidance', []), f)
         crowns = None
         for m in members:
             if isinstance(m, DeepForest):
-                crowns = m.crowns(frame['image'], f)
+                crowns = visible_crowns(cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR),
+                                        m.crowns(frame['image'], f), refine=False)
                 pixel = add_tree_crowns(pixel, crowns)
         work = cv2.cvtColor(np.asarray(image), cv2.COLOR_RGB2BGR)
-        zones = build_zones(work, pixel, (W0, H0), trees=crowns, votes=votes if len(votes) > 1 else None)
+        locked = np.zeros((H, W), np.uint8)
+        for polygon in request.get('locked_buildings', []):
+            cv2.fillPoly(locked, [np.round(np.asarray(polygon) * f).astype(np.int32)], 1)
+        shade = np.zeros((H, W), np.uint8)
+        for mark in request.get('guidance', []):
+            if mark['kind'] != 'shadow':
+                continue
+            pts = np.round(np.asarray(mark.get('stroke') or [mark['p']]) * f).astype(np.int32)
+            radius = max(3, round(mark.get('radius', 12) * f))
+            cv2.polylines(shade, [pts], False, 1, radius * 2)
+            for pt in pts:
+                cv2.circle(shade, tuple(pt), radius, 1, -1)
+        zones = build_zones(work, pixel, (W0, H0), trees=crowns, votes=votes if len(votes) > 1 else None, locked_buildings=locked, occlusion_mask=shade > 0)
         for r in zones:
             regions.append({'frame': frame['id'], **r})
         roofs = [np.array(r['polygon'], np.float32).reshape(-1, 1, 2) for r in zones if r.get('model_label') == 'building']
 
+        if request.get('phase') == 'zones':
+            continue
+        if request.get('phase') == 'points':
+            regions = [r for r in regions if r.get('role') == 'point']
         # Stage 2: lamp posts and benches as points, anywhere but on a roof.
         for prob, kind, x, y, said, spacing in council_points(image, [m for m in members if m.name in WEIGHTS], f):
             if any(cv2.pointPolygonTest(roof, (x / f, y / f), False) >= 0 for roof in roofs):

@@ -29,6 +29,15 @@ function createViewer(host, {image, width, height, hint = ''}) {
         const bw = Math.max(w, h * aspect), bh = bw / aspect;
         box = [cx - bw / 2, cy - bh / 2, bw, bh]; apply();
     }
+    function ensureVisible(x0, y0, x1, y1) {
+        const margin = 24 * api.scale;
+        x0 -= margin; y0 -= margin; x1 += margin; y1 += margin;
+        const factor = Math.max(1, (x1 - x0) / box[2], (y1 - y0) / box[3]);
+        const w = box[2] * factor, h = box[3] * factor;
+        const x = Math.min(x0, Math.max(box[0], x1 - w));
+        const y = Math.min(y0, Math.max(box[1], y1 - h));
+        box = [x, y, w, h]; apply();
+    }
     function point(e) {
         const p = svg.createSVGPoint(); p.x = e.clientX; p.y = e.clientY;
         const q = p.matrixTransform(svg.getScreenCTM().inverse());
@@ -41,12 +50,16 @@ function createViewer(host, {image, width, height, hint = ''}) {
     svg.addEventListener('wheel', e => { e.preventDefault(); zoom(Math.exp(Math.sign(e.deltaY) * .15), point(e)); }, {passive: false});
     svg.addEventListener('pointerdown', e => {
         if (e.button !== 0) return;
-        const handle = e.target.closest('[data-handle]');
+        const handle = api.panOnly ? null : e.target.closest('[data-handle]');
+        if (api.onStrokeStart?.(point(e), e)) {
+            drag = {stroke: true}; svg.setPointerCapture(e.pointerId); e.preventDefault(); return;
+        }
         drag = {start: point(e), screen: [e.clientX, e.clientY], box: [...box], handle: handle?.dataset.handle, moved: false};
         svg.setPointerCapture(e.pointerId);
     });
     svg.addEventListener('pointermove', e => {
         if (!drag) return;
+        if (drag.stroke) { api.onStrokeMove?.(point(e)); return; }
         if (Math.hypot(e.clientX - drag.screen[0], e.clientY - drag.screen[1]) > 3) drag.moved = true;
         if (drag.handle && api.onDrag) { api.onDrag(drag.handle, point(e)); return; }
         const r = svg.getBoundingClientRect(), k = drag.box[2] / r.width;
@@ -56,15 +69,17 @@ function createViewer(host, {image, width, height, hint = ''}) {
     svg.addEventListener('pointerup', e => {
         if (!drag) return;
         const d = drag; drag = null;
+        if (d.stroke) { api.onStrokeEnd?.(point(e)); return; }
         if (d.handle && d.moved && api.onDragEnd) api.onDragEnd(d.handle);
         else if (!d.moved && api.onClick) api.onClick(point(e), e.target);
     });
+    svg.addEventListener('pointercancel', () => { if (drag?.stroke) api.onStrokeCancel?.(); drag = null; });
     host.querySelector('.tools').addEventListener('click', e => {
         const z = e.target.dataset.z;
         if (z === 'in') zoom(1 / 1.4); if (z === 'out') zoom(1.4); if (z === 'fit') fit();
     });
     setImage(image, width, height);
-    Object.assign(api, {svg, overlay, fit, focus, setImage, draw(markup) { overlay.innerHTML = markup; }, get box() { return box; }});
+    Object.assign(api, {svg, overlay, fit, focus, ensureVisible, setImage, draw(markup) { overlay.innerHTML = markup; }, get box() { return box; }});
     requestAnimationFrame(fit);
     new ResizeObserver(() => { if (host.isConnected) apply(); }).observe(host);
     return api;

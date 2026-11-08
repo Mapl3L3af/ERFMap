@@ -5,12 +5,12 @@ The erfMap server (`server.js`) handles uploads, jobs and the review UI. Video p
 ## Setup
 
 1. Install Python 3.10 or later and FFmpeg (`ffmpeg` and `ffprobe` must be on PATH).
-2. `pip install -r worker/requirements.txt` (NumPy and OpenCV headless).
-3. Start erfMap as usual (`node server.js`) and open **Video Intake** on the front page, or go to `/intake/`. The intake page lists which tools it found.
+2. Create a project environment from the `opDrones` folder: `python3 -m venv .venv` (use Python 3.10+), then `.venv/bin/python -m pip install -r worker/requirements.txt` (NumPy, OpenCV headless and Pillow). On Windows use `python -m venv .venv` and `.venv\Scripts\python -m pip install -r worker/requirements.txt`.
+3. Start erfMap as usual (`node server.js`) and open **New Flyover** on the front page, or go to `/intake/`. The intake page lists which tools it found.
 
 | Variable | Purpose |
 | --- | --- |
-| `ERFMAP_PYTHON` | Python command (default `python3`, or `python` on Windows) |
+| `ERFMAP_PYTHON` | Python command. Defaults to the project's `.venv` interpreter when present, otherwise `python3` (`python` on Windows). An explicit override takes precedence. |
 | `ERFMAP_FFMPEG`, `ERFMAP_FFPROBE` | Path to `ffmpeg`/`ffprobe`, or to the folder that holds them. Setting one folder covers both. Otherwise the worker uses PATH and, on Windows, also checks the registry PATH and winget, Chocolatey, Scoop and `C:\ffmpeg\bin` installs. |
 | `ERFMAP_SEGMENTER` | Optional command that replaces the colour-clustering region detector (for example a SAM 2 wrapper) |
 | `ERFMAP_CLASSIFIER` | Optional command that labels regions (a model trained on erfMap labels) |
@@ -22,16 +22,27 @@ Set these before starting the server; the worker inherits the server's environme
 | Stage | Implementation | Status without extra setup |
 | --- | --- | --- |
 | Video & metadata | Video: `ffprobe` (container, codec, resolution, frame rate, rotation, creation time, camera tags, telemetry streams). Photos: size, plus camera, time and GPS-present flags from EXIF when Pillow is installed. GPS tags are never used. | Works. EXIF needs `pip install pillow`. |
-| 1. Frame selection | Video: FFmpeg samples up to 60 frames (at most 2 per second). Photos: each photo becomes a frame, downsized to 2000 px on the long side, and only clearly blurry or dark photos are dropped. OpenCV scores sharpness (Laplacian variance), brightness, contrast and edge texture. Frames are flagged as blurry, dark, overexposed, low texture or tilted (bright, featureless sky band). | Works. Tilt is a heuristic because the worker does not parse gimbal telemetry. |
-| 2. Image correction | CLAHE contrast equalisation and light denoising, with before/after previews. Lens correction runs only if `camera.json` (`fx`, `fy`, `cx`, `cy`, `dist`) is in the job folder. **Video:** ORB feature matching and RANSAC homographies chain each frame to a middle reference frame, giving a planar alignment preview. **Photos:** not stitched. Each photo is calibrated on its own, so the photos are laid out side by side on a photo sheet. | Works. Lens correction is unavailable without calibration. The video preview is not an orthomosaic. |
-| Scale calibration | **Photos:** one measured distance per photo. The reviewer picks a photo, clicks the two ends of something measured on the ground (sidewalk width, tape, two cones) and enters the length in ft, in, m or cm. Points and distance can be redone or edited. Photos without one are left out of the map. Segments are flagged when short (under 10% of the photo), near the photo edge, leaving the photo, ending on a featureless spot, or in a blurry or tilted photo. **Video:** measured distances and square boards (detected, then confirmed by the reviewer); the scale is their median. | Works. The scale comes only from what the reviewer enters and confirms. |
-| 3. Region detection | With `open_clip_torch` installed: CLIP zones and points (below), which also label each region. Otherwise k-means colour clustering, or `ERFMAP_SEGMENTER`. Up to 10 video keyframes, or every photo. | Works. Neither is a model trained on drone surveys. |
+| 1. Frame selection | Video: FFmpeg processes the full video in 30-second extraction sections at up to 2 frames per second, preserving up to 1080 px of image height. There is no whole-video frame cap; every aligned usable frame is analyzed. Longer videos require more processing time and storage. Photos: each photo becomes a frame, downsized to 2000 px on the long side, and only clearly blurry or dark photos are dropped. OpenCV scores sharpness (Laplacian variance), brightness, contrast and edge texture. Frames are flagged as blurry, dark, overexposed, low texture or tilted (bright, featureless sky band). | Works. Tilt is a heuristic because the worker does not parse gimbal telemetry. |
+| 2. Image correction | CLAHE cleanup and denoising, then ORB/RANSAC planar alignment. Overlapping photos are matched in any order and stitched into one scene; disconnected photos stop with an explanation instead of inventing adjacency. Video frames are chained to a middle reference. | Lens correction needs camera.json. This is a planar stitch, not an orthomosaic. |
+| Scale calibration | Select the two endpoints of one line segment on the assembled scene and specify its known length. That distance sets metres per pixel. | Required before map review. |
+| 3. Region detection | Classify the assembled scene once. The model council proposes zones and tree locations; candidate shadows are detected from local luminance. Without models, colour clusters remain unlabelled for correction. Benches and lights wait for zone approval. | CLIP or SegFormer enables automatic zone labels. |
 | 4. Classification | The bundled CLIP zero-shot adapter (`adapters/clip_classifier.py`) runs automatically once `open_clip_torch` is installed, or any command set in `ERFMAP_CLASSIFIER`. Predictions below 0.6 confidence, or with no label, are marked for review. | **Unavailable** until one is installed. Regions stay unlabelled, and the reviewer labels them. |
 | 5. Cross-frame merging | Regions are warped into the preview, matched by IoU over 0.3 (one per frame) and merged by majority vote. Label conflicts, varying geometry and single-frame detections are flagged. | Works |
-| 6. Map geometry | **Photos:** each photo's features are scaled by that photo's own distance; no scale is shared between photos. Photos are placed side by side in the output, because their real positions relative to each other are unknown. Each feature keeps its source photo, its calibration, its approximate size and its distance from the reference segment, and is flagged when it is far from it. **Video:** metres per preview pixel is the median over confirmed markers and measured distances, and disagreement is reported. Areas stay polygons, lines become the long axis of the region and points become centroids, following erfMap's `kinds` geometry. | Works once a photo (or the video) has a scale |
-| 7. Review & export | In the browser: relabel, rename, set an estimated height, move vertices, and accept or reject. Then import into erfMap, download the scenario JSON, or download a `.glb`. | Works |
+| 6. Map geometry | Convert scene polygons, path centre lines and tree points to local metres using the confirmed scene scale. | Approximate, unreferenced, no measured elevation. |
+| 7. Review & export | Repeat zone corrections until satisfied, approve dots next, then confirm building entrances and edge access. Import and downloads require completed review and connected path terminals. | Reviewer decisions are persisted. |
 
 Every stage writes `stages/<stage>/result.json` and its images under the job folder, `.erfmap-data/intake/<job>/`. The original upload is kept in `original/`. Retrying a stage clears that stage and the ones after it, and keeps earlier results. Rerunning correction or marker detection replaces marker confirmations, because the preview coordinates change.
+
+## Scene review
+
+New jobs use one stitched scene. Older saved jobs retain their independent photo calibration and export behavior; start a new intake for the new workflow.
+
+1. Review buildings, grass, paths and tree locations. Accepting a building locks its exact footprint during refinement. A correction click states the correct category, including changing something wrongly classified; connected similar colours select a local region. Reevaluate applies all zone corrections and reruns square building and path geometry. Repeat as needed. Vertex dragging remains available for precise boundaries.
+2. Shade and tree canopies are occlusion evidence. Similar-width path fragments facing each other can bridge a longer gap when at least half the gap is occluded, with buildings treated as barriers. Candidate shade is a brightness heuristic, not an astronomical model; coordinates, season and capture time are not used. User shade marks also guide these joins.
+3. Approve all zone/tree decisions to run the bundled model council for bench and light dots. Without the optional models, add dots manually. Mark missing objects or remove wrong dots, reevaluate, then approve or reject each proposal.
+4. Edge path ends receive proposed NPC spawn/leave markers. Mark actual doors on accepted building outlines; nearby path terminals connect to the door. Other interior endpoints are highlighted. Drag their vertices to a confirmed entrance, junction or scene edge. Path ends within 5% of the scene boundary extend to that edge. Only edge access markers must be accepted before import; interior endpoints and building entrances are optional. Return to an earlier review step when needed.
+
+Refinement is image-guided postprocessing of the proposals, not model retraining. New or changed proposals need acceptance again. Correction history and decisions are stored with the job. Re-running a pipeline stage clears review decisions because feature IDs and geometry may change.
 
 ## Adapter contracts
 
@@ -95,7 +106,7 @@ Notes:
 
 - The output is **locally scaled and unreferenced**: metres from an arbitrary origin, with axes that follow the reference video frame. North is unknown and no geographic coordinate is produced. The scenario records this under `site.localScale`.
 - One distance calibrates scale **near the measured segment** only. Perspective, camera tilt, terrain and lens distortion make sizes elsewhere in the photo approximate. Measure something long (at least a tenth of the photo's width), away from the edges, ideally near the features you care about.
-- Photos are not stitched, so their positions relative to each other are unknown. In the imported erfMap project they sit side by side; the gaps between them mean nothing. Sizes are approximate, not survey-grade, with no geographic coordinates and no measured heights.
+- Overlapping photos are stitched with planar homographies. Weak overlap stops scene assembly. Perspective, relief and parallax can still distort the assembled scene; sizes remain approximate, with no geographic coordinates or measured heights.
 - The planar alignment assumes a roughly flat site seen from above. Relief, tall objects, oblique views and lens distortion are not removed.
 - There is no elevation model. Scenarios have no ground samples, 3D exports are flat, and contours are not offered. Connecting an OpenDroneMap DSM is future work.
 - On the synthetic test video, scale from markers is within about 3% of ground truth, and a measured distance between two marker centres within 0.3%. Real footage will vary.
@@ -103,4 +114,20 @@ Notes:
 ## Tests
 
 - `npm test` runs the Node tests for conversion and GLB export.
-- `python -m unittest worker/tests/test_pipeline.py` renders a synthetic flyover with known scale (`worker/tests/make_synthetic_video.py`) and runs every worker stage, once on the video and once on five shuffled stills taken from it.
+- `.venv/bin/python -m unittest discover -s worker/tests -v` runs scene stitching, correction, occlusion and pipeline tests. The pipeline suite renders a synthetic flyover with known scale (`worker/tests/make_synthetic_video.py`) and runs every worker stage, once on the video and once on five shuffled stills taken from it.
+
+### Sketch-guided review and SAM 3
+
+Review opens with drawing tools. Drag a rough path centre line and choose its search corridor size. For buildings, click approximate corners and choose **Finish outline**. Recalculate reruns image inference: these marks bias model evidence, rather than forcing polygons. Accepted buildings remain constraints. In point review, outline a representative bench or light and recalculate to search again.
+
+The optional SAM 3 member supports these bench/light outlines as positive visual exemplars. Enable with `ERFMAP_SAM3=on` in the server environment after installing a Transformers release exposing `Sam3Model` and `Sam3Processor` plus PyTorch, and obtaining access to `facebook/sam3` on Hugging Face. Model loading downloads weights on first use. CUDA, Apple MPS and CPU are selected in that order. No hosted inference service is used. `ERFMAP_SAM3_MODEL` overrides the checkpoint. SAM 3 is not enabled or downloaded by default; without it, the existing council uses category detection and soft zone guidance, but does not learn appearance from example outlines. All results require review. See https://huggingface.co/docs/transformers/model_doc/sam3.
+
+Tree proposals now require stronger class/detector confidence, foliage coverage and local crown texture. Uniform lawn is suppressed. These conservative thresholds may miss small, low-contrast or leafless trees; validate against labelled site imagery before treating counts as accurate. The guidance plumbing is tested with synthetic/mocked outputs. SAM 3 inference itself has not been run or benchmarked on this site's imagery.
+
+Tree marker placement refines proposals against local foliage colour and distance
+from the crown boundary before converting them to original-photo coordinates.
+This helps offset boxes land inside the visible crown rather than on its edge.
+If the detector returns no usable crowns, semantic crown detection remains active.
+Fallback marker size follows the measured canopy radius, and refined duplicate
+points are suppressed. These checks use RGB imagery; they estimate the visible
+crown centre, not a measured treetop height. Rerun analysis to update old markers.

@@ -3,10 +3,10 @@ const walk = (() => {
     const canvas = document.getElementById('walk'), keys = new Set();
     let gl, program, buffer, texture, vertexCount=0, camera, scene, look, activeFrame=0, previous=0;
     let vertices=[], triangles=null, surface;
-    let heatTexture, uploadedHeat, weatherFrame=0;
+    let weatherFrame=0;
     const style='realistic';
     document.body.dataset.worldStyle=style;
-    const colors = {grass:'#9cc76e',shrub:'#53a653',soil:'#c59b68',water:'#4ab8df',pavement:'#c6bdac',road:'#676a7d',canopy:'#529951',unknown:'#9993aa'};
+    const colors = {grass:'#9cc76e',shrub:'#53a653',soil:'#c59b68',water:'#4ab8df',pavement:'#c6bdac',road:'#808080',canopy:'#529951',unknown:'#9993aa'};
     function initialize(){
         gl=canvas.getContext('webgl',{antialias:false,alpha:true});
         if(!gl) return false;
@@ -26,11 +26,10 @@ const walk = (() => {
             tint=col;uv=pos.xy/extent;textured=ground;depth=d;}`));
         gl.attachShader(program,shader(gl.FRAGMENT_SHADER,`
             precision mediump float;varying vec3 tint;varying vec2 uv;varying float textured,depth;
-            uniform sampler2D land,heat;uniform float fog,heatOn,visualStyle,wet;uniform vec3 ambient,skyTint;
+            uniform sampler2D land;uniform float fog,visualStyle,wet;uniform vec3 ambient,skyTint;
             void main(){vec3 rgb=tint*mix(vec3(1.),texture2D(land,uv).rgb,max(textured,0.));
             rgb*=ambient*mix(1.,wet,max(textured,0.));
             if(visualStyle<.5){float grey=dot(rgb,vec3(.299,.587,.114));rgb=vec3(grey);}
-            if(heatOn>.5 && textured>=0.){vec4 h=texture2D(heat,uv);rgb=mix(rgb,h.rgb,h.a*.94); }
             gl_FragColor=vec4(mix(rgb,visualStyle<.5?vec3(dot(skyTint,vec3(.299,.587,.114))):skyTint,smoothstep(fog*.45,fog*1.6,depth)*.65),1.);}`));
         gl.linkProgram(program);if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(program));
         gl.useProgram(program);buffer=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,buffer);
@@ -38,12 +37,6 @@ const walk = (() => {
             const a=gl.getAttribLocation(program,name);gl.enableVertexAttribArray(a);gl.vertexAttribPointer(a,n,gl.FLOAT,false,28,offset);
         }
         texture=gl.createTexture();
-        heatTexture=gl.createTexture();
-        gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,heatTexture);
-        gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,1,1,0,gl.RGBA,gl.UNSIGNED_BYTE,new Uint8Array(4));
-        for(const axis of [gl.TEXTURE_WRAP_S,gl.TEXTURE_WRAP_T])gl.texParameteri(gl.TEXTURE_2D,axis,gl.CLAMP_TO_EDGE);
-        for(const filter of [gl.TEXTURE_MIN_FILTER,gl.TEXTURE_MAG_FILTER])gl.texParameteri(gl.TEXTURE_2D,filter,gl.LINEAR);
-        gl.uniform1i(gl.getUniformLocation(program,'heat'),1);gl.activeTexture(gl.TEXTURE0);
         gl.enable(gl.DEPTH_TEST);return true;
     }
     const rgb=c=>[1,3,5].map(i=>parseInt(c.slice(i,i+2),16)/255);
@@ -236,12 +229,6 @@ const walk = (() => {
         if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;}
         gl.viewport(0,0,w,h);gl.clearColor(0,0,0,0);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);
         const uniform=n=>gl.getUniformLocation(program,n);
-        const heat=displayedAnalysis()?.canvas||null;
-        if(heat && uploadedHeat!==heat){
-            gl.activeTexture(gl.TEXTURE1);gl.bindTexture(gl.TEXTURE_2D,heatTexture);
-            gl.texImage2D(gl.TEXTURE_2D,0,gl.RGBA,gl.RGBA,gl.UNSIGNED_BYTE,heat);
-            gl.activeTexture(gl.TEXTURE0);uploadedHeat=heat;
-        }
         const conditions=scenarioConditions(),light=environmentLighting(conditions);
         const sky=style==='bare'?light.sky.map(()=>light.sky.reduce((s,v)=>s+v,0)/3):light.sky;
         const color=sky.map(v=>Math.round(v*255)).join(',');
@@ -253,7 +240,6 @@ const walk = (() => {
             'linear-gradient(rgb('+color+'),rgb('+sky.map(v=>Math.round(Math.min(1,v+.1)*255)).join(',')+'))';
         gl.uniform3fv(uniform('ambient'),light.tint);gl.uniform3fv(uniform('skyTint'),sky);gl.uniform1f(uniform('wet'),light.wet);
         gl.uniform1f(uniform('visualStyle'),style==='bare'?0:style==='stylized'?1:2);
-        gl.uniform1f(uniform('heatOn'),heat?1:0);
         gl.uniform3f(uniform('eye'),camera.x,camera.y,(camera.feet??surface([camera.x,camera.y]))+1.7);
         gl.uniform2f(uniform('turn'),Math.cos(camera.yaw),Math.sin(camera.yaw));gl.uniform2f(uniform('tilt'),Math.cos(camera.pitch),Math.sin(camera.pitch));
         gl.uniform2f(uniform('extent'),site.w,site.h);gl.uniform1f(uniform('aspect'),w/h);gl.uniform1f(uniform('fog'),Math.max(site.w,site.h)*light.fog);

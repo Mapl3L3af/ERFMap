@@ -29,8 +29,29 @@ function createIntake({directory, createProject, readBody}) {
     const root = path.join(directory, 'intake');
     fs.mkdirSync(root, {recursive: true});
     const jobs = new Map(), listeners = new Map(), children = new Map();
-    const python = process.env.ERFMAP_PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
+    const localPython = path.join(__dirname, '..', '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+    const python = process.env.ERFMAP_PYTHON || (fs.existsSync(localPython) ? localPython : (process.platform === 'win32' ? 'python' : 'python3'));
     let capabilityCache = null;
+    let stopping = false;
+    const workers = new Set();
+    function spawnWorker(args) {
+        if (stopping) throw failure(503, 'Server is stopping.');
+        // A process group includes Python's FFmpeg and adapter subprocesses.
+        const child = spawn(python, args, {windowsHide: true, detached: process.platform !== 'win32'});
+        workers.add(child);
+        child.once('close', () => { if (!stopping) workers.delete(child); });
+        return child;
+    }
+    function stopWorkers(signal = 'SIGTERM') {
+        stopping = true;
+        for (const child of workers) {
+            try {
+                if (process.platform === 'win32') child.kill(signal);
+                else if (child.pid) process.kill(-child.pid, signal);
+            } catch (error) { if (error.code !== 'ESRCH') throw error; }
+        }
+    }
+
 
     const dir = id => path.join(root, id);
     const write = (file, data) => { fs.writeFileSync(file + '.tmp', JSON.stringify(data, null, 1)); fs.renameSync(file + '.tmp', file); };
@@ -66,7 +87,7 @@ function createIntake({directory, createProject, readBody}) {
         if (capabilityCache && Date.now() - capabilityCache.at < 30000) return Promise.resolve(capabilityCache.value);
         return new Promise(resolve => {
             let out = '', err = '';
-            const child = spawn(python, [WORKER, 'capabilities'], {windowsHide: true});
+            const child = spawnWorker([WORKER, 'capabilities']);
             child.stdout.on('data', d => out += d);
             child.stderr.on('data', d => err += d);
             child.on('error', e => resolve({python: null, error: 'Python was not found (' + python + '): ' + e.message + '. Install Python 3.10+ or set ERFMAP_PYTHON.'}));
@@ -85,6 +106,7 @@ function createIntake({directory, createProject, readBody}) {
     // the next one start. "unavailable" stops the pipeline unless the stage is
     // optional (classification), in which case later stages proceed without labels.
     function reset(job, fromStage) {
+        job.review = {features: {}, phase: 'zones', feedback: []};
         const start = STAGES.findIndex(s => s.id === fromStage);
         for (const stage of STAGES.slice(start)) {
             if (stage.worker) fs.rmSync(path.join(dir(job.id), 'stages', stage.id), {recursive: true, force: true});
@@ -96,9 +118,20 @@ function createIntake({directory, createProject, readBody}) {
         return ['complete', 'needs_review'].includes(state.status) || (stage.optional && state.status === 'unavailable');
     }
     function advance(job) {
-        if (children.has(job.id) || job.started === false) return;
+        if (stopping || children.has(job.id) || job.started === false) return;
         for (const stage of STAGES) {
             const state = job.stages[stage.id];
+            if (stage.id === 'regions' && !(job.calibration?.references || []).some(r => r.confirmed !== false)) {
+                let changed = false;
+                for (const later of STAGES.slice(STAGES.indexOf(stage))) {
+                    if (job.stages[later.id].status !== 'blocked') {
+                        Object.assign(job.stages[later.id], {status: 'blocked', progress: 0, summary: 'Save a reference line to unlock processing.'});
+                        changed = true;
+                    }
+                }
+                if (changed) save(job);
+                return;
+            }
             if (stage.id === 'review') {
                 const geometry = result(job.id, 'geometry');
                 const ready = geometry?.features?.length;
@@ -130,7 +163,7 @@ function createIntake({directory, createProject, readBody}) {
         Object.assign(state, {status: 'processing', progress: 0, message: 'Starting', error: undefined, startedAt: new Date().toISOString(), finishedAt: undefined, attempts: (state.attempts || 0) + 1});
         save(job);
         let child;
-        try { child = spawn(python, [WORKER, 'run', stage.id, dir(job.id)], {windowsHide: true, env: process.env}); }
+        try { child = spawnWorker([WORKER, 'run', stage.id, dir(job.id)]); }
         catch (e) { return finish(job, stage, {status: 'unavailable', reason: 'Could not start Python: ' + e.message}); }
         children.set(job.id, child);
         let buffer = '', stderr = '', last = null, settled = false;
@@ -176,6 +209,34 @@ function createIntake({directory, createProject, readBody}) {
     }
 
     // ------------------------------------------------------------ exports
+    async function refine(job, mode, marks = []) {
+        if (children.has(job.id)) throw failure(409, 'A stage is still running.');
+        const features = reviewed(job);
+        const keep = job.review?.features || {};
+        const response = await new Promise((resolve, reject) => {
+            const child = spawnWorker([path.join(__dirname, '..', 'worker', 'scene_review.py'), dir(job.id)]);
+            children.set(job.id, child);
+            let out = '', err = '';
+            const timer = setTimeout(() => child.kill(), 15 * 60 * 1000);
+            child.stdout.on('data', chunk => { out = (out + chunk).slice(-4000); });
+            child.stderr.on('data', chunk => { err = (err + chunk).slice(-4000); });
+            child.stdin.on('error', () => {});
+            child.on('error', e => { clearTimeout(timer); children.delete(job.id); reject(failure(503, e.message)); });
+            child.on('close', code => {
+                clearTimeout(timer); children.delete(job.id);
+                if (code !== 0) return reject(failure(422, err.trim().split('\n').pop() || 'Review refinement failed.'));
+                try { resolve(JSON.parse(out)); } catch { reject(failure(500, 'Invalid refinement response.')); }
+            });
+            child.stdin.end(JSON.stringify({mode, marks, features}));
+        });
+        const geometry = result(job.id, 'geometry');
+        const ids = new Set(geometry.features.map(f => f.id));
+        job.review = {...job.review, features: Object.fromEntries(Object.entries(keep).filter(([id]) => ids.has(id)))};
+        if (mode === 'ground') for (const f of geometry.features.filter(f => f.kind === 'grass')) job.review.features[f.id] = {status: 'accepted'};
+        job.stages.geometry.finishedAt = new Date().toISOString();
+        return response;
+    }
+
     function reviewed(job) {
         const geometry = result(job.id, 'geometry');
         if (!geometry?.features?.length) throw failure(409, 'Map geometry is not ready yet.');
@@ -183,6 +244,7 @@ function createIntake({directory, createProject, readBody}) {
     }
     function scenario(job) {
         const geometry = result(job.id, 'geometry');
+        if (job.sceneMode === 'stitched' && job.review?.phase !== 'ready') throw failure(409, 'Finish zone, point and access review before importing.');
         const site = shared.buildSite({job, geometry, features: reviewed(job), labels: labels().labels});
         if (!site.features.length) throw failure(409, 'Accept at least one feature before exporting.');
         return {format: 'fieldform-site-v1', site: restore(site)};
@@ -216,8 +278,8 @@ function createIntake({directory, createProject, readBody}) {
         try { size = await receive(req, target, MAX_UPLOAD); }
         catch (e) { fs.rmSync(dir(id), {recursive: true, force: true}); throw e; }
         const original = {name, path: 'original/' + name, size, type: req.headers['content-type'] || null};
-        const job = {id, name, media, createdAt: new Date().toISOString(), original, originals: [original], started: media === 'video' || url.searchParams.get('defer') !== '1',
-            stages: Object.fromEntries(STAGES.map(s => [s.id, {status: 'queued', progress: 0, attempts: 0}])), calibration: {markers: [], references: [], markerSideM: 0.3048}, review: {features: {}}, imports: []};
+        const job = {id, name, media, sceneMode: 'stitched', createdAt: new Date().toISOString(), original, originals: [original], started: media === 'video' || url.searchParams.get('defer') !== '1',
+            stages: Object.fromEntries(STAGES.map(s => [s.id, {status: 'queued', progress: 0, attempts: 0}])), calibration: {markers: [], references: [], markerSideM: 0.3048}, review: {features: {}, phase: 'zones', feedback: []}, imports: []};
         write(path.join(dir(id), 'labels.json'), labels());
         jobs.set(id, job);
         save(job);
@@ -320,13 +382,105 @@ function createIntake({directory, createProject, readBody}) {
                     ? {status: 'complete', summary: job.calibration.references.some(r => r.frame)
                         ? new Set(job.calibration.references.filter(r => r.frame).map(r => r.frame)).size + ' photo(s) calibrated with a measured distance'
                         : confirmed + ' scale reference(s) confirmed: ' + job.calibration.markers.filter(m => m.confirmed).length + ' marker(s), ' + job.calibration.references.length + ' measured distance(s)'}
-                    : {status: 'needs_review', summary: 'Nothing confirmed. Confirm a marker or add a measured distance to scale the map.'});
+                    : {status: 'needs_review', summary: 'Specify the known length of a line segment to scale the map.'});
             }
             if (passable(STAGES.find(s => s.id === 'merging'), job.stages.merging)) reset(job, 'geometry');
             save(job); advance(job);
             return json(publicJob(job)), true;
         }
+        if (action === 'feedback' && req.method === 'POST') {
+            const input = await readBody(req);
+            const phase = job.review?.phase || 'zones';
+            if (!['zones', 'points'].includes(phase)) throw failure(409, 'Return to zone or point review to make corrections.');
+            const allowed = phase === 'zones' ? ['building', 'path', 'tree', 'shadow'] : ['tree', 'bench', 'light', 'remove'];
+            if (!Array.isArray(input.marks) || !input.marks.length || input.marks.length > 200 || !input.marks.every(m => allowed.includes(m.kind) && Array.isArray(m.p) && m.p.length === 2 && m.p.every(Number.isFinite))) throw failure(400, 'Provide up to 200 valid correction points.');
+            const validPoint = p => Array.isArray(p) && p.length === 2 && p.every(Number.isFinite);
+            if (input.marks.some(m => m.stroke !== undefined && (!['zones', 'points'].includes(phase) || !Array.isArray(m.stroke) || m.stroke.length < 2 || m.stroke.length > 2000 || !m.stroke.every(validPoint) || !Number.isFinite(m.radius) || m.radius <= 0))) throw failure(400, 'Provide valid brush strokes and a positive radius.');
+            if (input.marks.some(m => m.outline !== undefined && (!['building', 'bench', 'light'].includes(m.kind) || !Array.isArray(m.outline) || m.outline.length < 3 || m.outline.length > 2000 || !m.outline.every(validPoint)))) throw failure(400, 'Provide a valid outline with at least three points.');
+            const geometry = result(job.id, 'geometry');
+            if (!geometry?.scale) throw failure(409, 'Calibrate the scene first.');
+            const sc = geometry.scale;
+            if (input.marks.flatMap(m => (m.stroke || []).concat(m.outline || [], [m.p])).some(p => { const x = p[0] / sc.m_per_px + sc.origin_px[0], y = p[1] / sc.m_per_px + sc.origin_px[1]; return x < 0 || y < 0 || x >= geometry.mosaic.width || y >= geometry.mosaic.height; })) throw failure(400, 'Correction points must be inside the scene.');
+            const feedback = [...(job.review?.feedback || []), ...input.marks];
+            await refine(job, phase === 'zones' ? 'zones' : 'dots', phase === 'zones' ? feedback.filter(m => ['building', 'path', 'tree', 'shadow'].includes(m.kind)) : feedback.filter(m => ['bench', 'light', 'tree', 'remove'].includes(m.kind)));
+            job.review.feedback = feedback;
+            save(job);
+            return json({review: job.review}), true;
+        }
+        if (action === 'review-step' && req.method === 'POST') {
+            const input = await readBody(req);
+            if (children.has(job.id)) throw failure(409, 'A stage is still running.');
+            const phase = job.review?.phase || 'zones';
+            if (input.back) {
+                job.review = {...job.review, phase: input.back === 'zones' ? 'zones' : 'points'};
+            } else {
+                const features = reviewed(job), geometry = result(job.id, 'geometry');
+                const relevant = features.filter(f => phase === 'zones' ? f.kind !== 'grass' && (f.geometry !== 'point' || f.kind === 'tree') : phase === 'points' ? ['bench', 'light', 'tree'].includes(f.kind) : f.kind === 'entrance');
+                if (relevant.some(f => f.status === 'proposed')) throw failure(409, 'Accept or reject every proposal in this review step first.');
+                if (phase === 'zones') {
+                    if (!features.some(f => f.status === 'accepted' && f.geometry !== 'point')) throw failure(409, 'Accept at least one zone first.');
+                    if (geometry.mosaic?.image) await refine(job, 'ground');
+                    if (!job.review.pointsDetected) {
+                        await refine(job, 'points');
+                        job.review.pointsDetected = true;
+                    }
+                    job.review.phase = 'points';
+                } else if (phase === 'points') {
+                    const access = shared.edgeAccess(features, geometry);
+                    const regenerated = new Set(access.map(f => f.id));
+                    geometry.features = geometry.features.filter(f => !regenerated.has(f.id));
+                    geometry.features.push(...access);
+                    for (const f of access) delete job.review.features[f.id];
+                    write(path.join(dir(job.id), 'stages/geometry/result.json'), geometry);
+                    job.review.phase = 'access';
+                } else if (phase === 'access') {
+                    const missing = shared.edgeAccess(features, geometry);
+                    if (missing.length) throw failure(409, 'Every scene-edge path end needs an accepted access marker. Return to point review to regenerate them.');
+                    job.review.phase = 'ready';
+                }
+            }
+            save(job);
+            return json({review: job.review}), true;
+        }
+        if (action === 'entrance' && req.method === 'POST') {
+            if (children.has(job.id)) throw failure(409, 'A stage is still running.');
+            if (job.review?.phase !== 'access') throw failure(409, 'Finish zone and point review first.');
+            const input = await readBody(req), geometry = result(job.id, 'geometry');
+            if (!Array.isArray(input.p) || input.p.length !== 2 || !input.p.every(Number.isFinite)) throw failure(400, 'Click a building entrance.');
+            const buildings = reviewed(job).filter(f => f.kind === 'building' && f.status === 'accepted');
+            let best = null;
+            for (const building of buildings) for (let i = 0; i < building.p.length; i++) {
+                const p = shared.segmentPoint(input.p, building.p[i], building.p[(i + 1) % building.p.length]);
+                const d = Math.hypot(p[0] - input.p[0], p[1] - input.p[1]);
+                if (!best || d < best.d) {
+                    const a = building.p[i], b = building.p[(i + 1) % building.p.length];
+                    const winding = Math.sign(building.p.reduce((s, q, j) => { const r = building.p[(j + 1) % building.p.length]; return s + q[0] * r[1] - r[0] * q[1]; }, 0)) || 1;
+                    const length = Math.hypot(b[0] - a[0], b[1] - a[1]) || 1;
+                    const offset = Math.max(.05, geometry.scale.m_per_px * .5);
+                    best = {p: [p[0] + winding * (b[1] - a[1]) / length * offset, p[1] - winding * (b[0] - a[0]) / length * offset], d};
+                }
+            }
+            if (!best || best.d > Math.max(1, geometry.scale.m_per_px * 15)) throw failure(400, 'Click on an accepted building outline at its actual entrance.');
+            const id = 'entrance-' + randomUUID();
+            geometry.features.push({id, kind: 'entrance', geometry: 'point', p: [best.p], region: [best.p], name: 'Building entrance', flags: ['Entrance placed by reviewer'], frames: ['scene']});
+            // Join a nearby terminal to the confirmed door; distant ends remain flagged.
+            for (const end of shared.pathEnds(reviewed(job), geometry).filter(e => e.type === 'unresolved')) {
+                const pathFeature = reviewed(job).find(f => f.id === end.path);
+                if (Math.hypot(best.p[0] - end.p[0], best.p[1] - end.p[1]) <= Math.max(1, pathFeature.width || 1)) {
+                    const p = pathFeature.p.map(q => [...q]);
+                    if (Math.hypot(best.p[0] - end.p[0], best.p[1] - end.p[1]) > 1e-6) {
+                        if (end.index === 0) p.unshift(best.p); else p.push(best.p);
+                    }
+                    job.review.features[end.path] = {...job.review.features[end.path], p};
+                }
+            }
+            write(path.join(dir(job.id), 'stages/geometry/result.json'), geometry);
+            job.review.features[id] = {status: 'accepted', reviewedAt: new Date().toISOString()};
+            save(job);
+            return json({review: job.review}), true;
+        }
         if (action === 'review' && req.method === 'POST') {
+            if (children.has(job.id)) throw failure(409, 'A stage is still running.');
             const input = await readBody(req);
             const geometry = result(job.id, 'geometry');
             const ids = new Set((geometry?.features || []).map(f => f.id));
@@ -339,7 +493,8 @@ function createIntake({directory, createProject, readBody}) {
                 if (edit.p !== undefined && edit.p !== null && !(Array.isArray(edit.p) && edit.p.every(q => Array.isArray(q) && q.length === 2 && q.every(Number.isFinite)))) throw failure(400, 'Invalid geometry.');
                 next[id] = {...next[id], ...edit, name: edit.name === undefined ? next[id]?.name : String(edit.name).slice(0, 120), reviewedAt: new Date().toISOString()};
             }
-            job.review = {features: next};
+            job.review = {...job.review, features: next};
+            if (job.review.phase === 'ready') job.review.phase = 'access';
             save(job);
             return json({review: job.review}), true;
         }
@@ -370,7 +525,7 @@ function createIntake({directory, createProject, readBody}) {
         throw failure(404, 'Unknown intake address.');
     }
 
-    return {route, capabilities};
+    return {route, capabilities, stopWorkers};
 }
 
 module.exports = {createIntake};
