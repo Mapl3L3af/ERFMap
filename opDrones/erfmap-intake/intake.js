@@ -534,14 +534,18 @@ async function viewReview(body, payload) {
     const visible = f => phase === 'zones' ? f.kind !== 'grass' && (f.geometry !== 'point' || f.kind === 'tree') : phase === 'points' ? ['tree', 'bench', 'light'].includes(f.kind) : phase === 'access' ? ['entrance', 'path'].includes(f.kind) : true;
     const title = {zones: '1 · Review zones and trees', points: '2 · Review benches and lights', access: '3 · Confirm entrances and NPC access', ready: 'Ready to import'}[phase];
     const options = phase === 'zones' ? ['select', 'building', 'path', 'tree', 'shadow'] : phase === 'points' ? ['select', 'tree', 'bench', 'light', 'remove'] : phase === 'access' ? ['select', 'entrance'] : ['select'];
-    const toolbar = staged ? '<h3>' + title + '</h3><p>' + ({zones: 'Start with rough guidance: drag a general path line, or click building corners and choose Finish outline. Reevaluate to let the model fit visible boundaries; sketches are suggestions, not final answers. Accept the resulting proposals when correct. Use trees and shade to explain hidden path sections.', points: 'Outline one representative bench and one light post: choose the category, click around the object, then Finish outline. SAM 3 uses these examples to search for similar objects when enabled. Reevaluate and review the proposals. Remove dot suppresses an incorrect detection.', access: 'NPC spawn and leave points are only required at scene-edge path ends. Paths ending within 5% of the map boundary extend to the edge. Building entrances are optional. Click the actual door on an accepted building outline. Nearby path ends join it; red circles show optional interior connections. Select a path to drag its end to the correct entrance or scene edge.', ready: 'Zone, point and access review are complete.'}[phase]) + '</p>'
+    const stepNo = {zones: 1, points: 2, access: 3, ready: 3}[phase] || 1;
+    const stepName = {zones: 'Zones', points: 'Dots', access: 'Entrances', ready: 'Ready'}[phase];
+    const nextLabel = {zones: 'Continue to dots →', points: 'Continue to entrances →', access: 'Finish review →'}[phase] || '';
+    const toolbar = staged ? '<details class="fix-tools"><summary>Fix or add shapes</summary><p>' + ({zones: 'Start with rough guidance: drag a general path line, or click building corners and choose Finish outline. Reevaluate to let the model fit visible boundaries; sketches are suggestions, not final answers. Accept the resulting proposals when correct. Use trees and shade to explain hidden path sections.', points: 'Outline one representative bench and one light post: choose the category, click around the object, then Finish outline. SAM 3 uses these examples to search for similar objects when enabled. Reevaluate and review the proposals. Remove dot suppresses an incorrect detection.', access: 'NPC spawn and leave points are only required at scene-edge path ends. Paths ending within 5% of the map boundary extend to the edge. Building entrances are optional. Click the actual door on an accepted building outline. Nearby path ends join it; red circles show optional interior connections. Select a path to drag its end to the correct entrance or scene edge.', ready: 'Zone, point and access review are complete.'}[phase]) + '</p>'
         + (geometry.pointDetection && phase === 'points' ? '<p class="note">' + esc(geometry.pointDetection) + '</p>' : '')
         + '<div class="row"><label>Action <select id="clickMode">' + options.map(k => '<option value="' + k + '">' + ({select: 'Select / edit', shadow: 'This is shadow', remove: 'Remove dot', entrance: 'Mark building entrance'}[k] || 'This is ' + label(k).label) + '</option>').join('') + '</select></label><label><input type="checkbox" id="showShadows"> Show candidate shadows</label>'
         + (['zones', 'points'].includes(phase) ? '<button type="button" id="finishOutline">Finish outline</button><label>Search corridor size <input id="brushSize" type="range" min="8" max="100" value="32"></label>' : '')
         + (['zones', 'points'].includes(phase) ? '<button type="button" id="reevaluate">Recalculate corrections</button><button type="button" id="undoMark">Undo mark</button><span id="markCount" class="cap">0 corrections</span>' : '') + '</div>'
         + (geometry.evidence?.note ? '<p class="cap">' + esc(geometry.evidence.note) + '</p>' : '')
-        + '<div class="row"><button type="button" id="approveStep" class="primary"' + (phase === 'ready' ? ' hidden' : '') + '>' + ({zones: 'Zones look right → review dots', points: 'Dots look right → place entrances', access: 'Access looks right → ready for import'}[phase] || '') + '</button>'
-        + (phase !== 'zones' ? '<button type="button" data-back="zones">Return to zones</button>' : '') + (['access', 'ready'].includes(phase) ? '<button type="button" data-back="points">Return to dots</button>' : '') + '</div><p id="pathIssues" class="cap"></p>' : '';
+        + '</details><p id="pathIssues" class="cap"></p>'
+        + '<div class="step-actions"><button type="button" id="approveStep" class="primary"' + (phase === 'ready' ? ' hidden' : '') + '>' + nextLabel + '</button>'
+        + (phase !== 'zones' ? '<button type="button" data-back="zones">← Back to zones</button>' : '') + (['access', 'ready'].includes(phase) ? '<button type="button" data-back="points">← Back to dots</button>' : '') + '</div>' : '';
     const kindOptions = kind => ['area', 'line', 'point'].map(g => '<optgroup label="' + g[0].toUpperCase() + g.slice(1) + 's">' + labels.filter(l => l.geometry === g && !(staged && phase === 'zones' && l.kind === 'grass')).map(l => '<option value="' + l.kind + '"' + (l.kind === kind ? ' selected' : '') + '>' + esc(l.label) + ' (' + l.kind + ')</option>').join('') + '</optgroup>').join('');
     const features = () => S.reviewedFeatures(geometry, edits, labels);
     const pendingFeatures = () => features().filter(f => visible(f) && f.status === 'proposed');
@@ -550,10 +554,15 @@ async function viewReview(body, payload) {
         + '<span class="toolbar-divider"></span><span class="cap">' + esc(title) + '</span><button type="button" id="pipelineToggle" aria-expanded="false">Progress</button></div>'
         + '<div id="rmap"></div><footer class="review-map-status"><span id="rstatus" role="status">Select a feature to review its properties.</span><span>Scroll to zoom · drag to pan · drag vertices to edit</span></footer></article>'
         + '<aside class="review-controls"><button type="button" id="foldReview" aria-expanded="true" aria-controls="reviewToolBody">Hide tools</button><div id="reviewToolBody"><small class="cap">CONTROL PANEL</small>'
-        + '<nav class="review-tabs" aria-label="Review panels"><button type="button" data-review-tab="review" aria-pressed="true">Review</button><button type="button" data-review-tab="features" aria-pressed="false">Justify</button><button type="button" data-review-tab="export" aria-pressed="false">Export</button></nav>'
-        + '<section data-review-panel="review"><div class="note warn">Only accepted features are imported. Amber dashed outlines are pending; solid outlines are accepted.</div>' + toolbar
-        + '<p>Review each feature in Justify. Choose Yes to accept it or No to reject it and continue.</p><p id="reviewCounts" class="cap"></p></section>'
-        + '<section data-review-panel="features" hidden><h2>Feature properties</h2><p class="review-help">Is this feature correct? Review its properties, then choose Yes or No to submit and continue.</p><button type="button" id="acceptAll">Accept all</button><div class="review-table"><table><tbody id="rows"></tbody></table></div></section>'
+        + '<nav class="review-tabs" aria-label="Review panels"><button type="button" data-review-tab="review" aria-pressed="true">Review</button><button type="button" data-review-tab="export" aria-pressed="false">Export</button></nav>'
+        + '<section data-review-panel="review">'
+        + (staged ? '<ol class="review-stepper">' + ['Zones', 'Dots', 'Entrances'].map((n, i) => '<li class="' + (i + 1 < stepNo || phase === 'ready' ? 'done' : i + 1 === stepNo ? 'active' : '') + '">' + (i + 1) + ' · ' + n + '</li>').join('') + '</ol>' : '')
+        + '<h3 class="review-step-title">' + (phase === 'ready' ? 'All checked. Ready to import.' : 'Check each ' + ({zones: 'zone and tree', points: 'dot', access: 'entrance'}[phase] || 'item')) + '</h3>'
+        + '<p class="review-help">' + (phase === 'ready' ? 'Open Export to bring the map into erfMap.' : 'Click an item in the list or on the map to zoom to it. Press <b>✓ Keep</b> if it is right, <b>✕ Remove</b> if it is wrong, or change its type.') + '</p>'
+        + '<div class="review-progress"><i id="reviewBar"></i></div><p id="reviewCounts" class="cap"></p>'
+        + '<div class="row"><button type="button" id="acceptAll">✓ Keep all remaining</button></div>'
+        + '<ul class="review-checklist" id="rows"></ul>' + toolbar + '</section>'
+
         + '<section data-review-panel="export" hidden><h2>Export</h2><div class="export"><section id="exportScenario"></section><section id="export3d"></section></div></section></div></aside></section>';
     const v = viewer = mapView(document.getElementById('rmap'), geometry, () => features().filter(f => reviewPanel !== 'features' || f.id === active), {editable: phase !== 'ready' || !staged, active: () => active, shadows: () => shadows,
         overlay: (toPx, k) => {
@@ -571,13 +580,14 @@ async function viewReview(body, payload) {
             .catch(e => { say(e.message); });
     };
     const rows = () => {
-        document.getElementById('rows').innerHTML = features().filter(f => f.id === active).map(f => '<tr data-row="' + f.id + '" aria-selected="' + (f.id === active) + '" class="' + f.status + '"><td data-field="Feature"><button type="button" data-feature="' + esc(f.id) + '" aria-label="Edit ' + esc(f.name) + '">' + esc(f.name) + '</button><br><span class="cap">' + esc(f.id) + '</span>' + (phase === 'zones' && f.kind === 'building' && f.status === 'accepted' ? '<br>Locked' : '') + '</td>'
-            + '<td data-field="Label"><select data-edit="kind" data-id="' + f.id + '">' + kindOptions(f.kind) + '</select>' + (f.predictedKind ? '' : '<span class="cap">no model label</span>') + '</td>'
-            + '<td data-field="Name"><input data-edit="name" data-id="' + f.id + '" value="' + esc(f.name) + '"></td>'
-            + '<td data-field="Approximate size">' + (f.size.area_m2 != null ? '≈ ' + f.size.area_m2 + ' m²' : f.size.length_m != null ? '≈ ' + f.size.length_m + ' m long' : '<span class="cap">point</span>') + (f.image ? '<br><span class="cap">' + esc(f.image.source || f.image.frame) + ' · scale ' + esc(f.calibration.id) + ' (' + esc(fmtLength(f.calibration.metres)) + ')</span>' : '') + '</td>'
-            + '<td data-field="Height (m)">' + (f.geometry === 'area' ? '<input data-edit="height" data-id="' + f.id + '" type="number" min="0" step="0.1" placeholder="estimate" value="' + (f.height ?? '') + '">' : '<span class="cap">—</span>') + '</td>'
-            + '<td data-field="Model">' + (f.predictedKind ? esc(label(f.predictedKind).label) + ' · ' + pct(f.confidence) : '—') + '</td><td data-field="Flags">' + flags(f.flags, ['conflict', 'label', 'geometry']) + (f.note ? '<br><span class="cap">' + esc(f.note) + '</span>' : '') + '</td>'
-            + '<td data-field="Decision"><div class="row"><button type="button" data-status="accepted" data-id="' + f.id + '" class="' + (f.status === 'accepted' ? 'primary' : '') + '">Yes</button><button type="button" data-status="rejected" data-id="' + f.id + '"' + (f.status === 'rejected' ? ' style="border-color:#e0705f"' : '') + '>No</button></div></td></tr>').join('') || '<tr><td>All features in this step have been reviewed.</td></tr>';
+        const list = features().filter(visible);
+        document.getElementById('rows').innerHTML = list.map(f => '<li data-row="' + f.id + '" class="' + f.status + (f.id === active ? ' current' : '') + '" aria-selected="' + (f.id === active) + '">'
+            + '<i class="swatch" style="background:' + label(f.kind).color + '"></i>'
+            + '<span class="item"><b>' + esc(f.name) + '</b><small>' + esc(label(f.kind).label) + (f.confidence != null ? ' · ' + pct(f.confidence) + ' sure' : '') + (f.size?.area_m2 != null ? ' · ≈ ' + f.size.area_m2 + ' m²' : '') + '</small>'
+            + '<select data-edit="kind" data-id="' + f.id + '" aria-label="Type of ' + esc(f.name) + '">' + kindOptions(f.kind) + '</select></span>'
+            + '<span class="decide"><button type="button" data-status="accepted" data-id="' + f.id + '" class="keep' + (f.status === 'accepted' ? ' on' : '') + '" aria-pressed="' + (f.status === 'accepted') + '">✓ Keep</button>'
+            + '<button type="button" data-status="rejected" data-id="' + f.id + '" class="drop-item' + (f.status === 'rejected' ? ' on' : '') + '" aria-pressed="' + (f.status === 'rejected') + '">✕ Remove</button></span></li>').join('')
+            || '<li class="empty">Nothing to check in this step.</li>';
     };
     function refresh() {
         const pending = pendingFeatures();
@@ -585,12 +595,16 @@ async function viewReview(body, payload) {
         const changed = active !== (next?.id || null);
         active = next?.id || null;
         rows(); v.redraw();
-        if (changed && active && reviewPanel === 'features') focusFeature(active);
+        if (changed && active) focusFeature(active);
         document.getElementById('acceptAll').disabled = busy || submitting || !pending.length || (staged && phase === 'ready');
         document.getElementById('rstatus').textContent = submitting ? 'Submitting decision…' : next ? 'Review ' + next.name + ' · ' + pending.length + ' remaining' : 'All features in this step have been reviewed.';
         if (submitting) body.querySelectorAll('[data-edit], [data-status]').forEach(el => { el.disabled = true; });
         const list = features().filter(visible);
-        document.getElementById('reviewCounts').textContent = list.filter(f => f.status === 'accepted').length + ' accepted · ' + list.filter(f => f.status === 'proposed').length + ' pending · ' + list.filter(f => f.status === 'rejected').length + ' rejected';
+        const checked = list.filter(f => f.status !== 'proposed').length;
+        document.getElementById('reviewCounts').textContent = checked + ' of ' + list.length + ' checked · ' + list.filter(f => f.status === 'accepted').length + ' kept · ' + list.filter(f => f.status === 'rejected').length + ' removed';
+        document.getElementById('reviewBar').style.width = (list.length ? 100 * checked / list.length : 100) + '%';
+        const go = document.getElementById('approveStep');
+        if (go && phase !== 'ready') { const left = list.length - checked; go.disabled = busy || submitting || left > 0; go.textContent = left > 0 ? 'Check ' + left + ' more to continue' : nextLabel; }
         if (staged && phase === 'ready') body.querySelectorAll('[data-edit], [data-status], #acceptLabelled').forEach(el => { el.disabled = true; });
         if (document.getElementById('markCount')) document.getElementById('markCount').textContent = marks.length + ' correction(s)';
         if (document.getElementById('pathIssues')) { const ends = S.pathEnds(features(), geometry).filter(e => e.type === 'unresolved'); document.getElementById('pathIssues').textContent = phase === 'access' ? ends.length + ' unresolved path end(s). Interior path ends may remain; only scene-edge access points are required.' : ''; }
@@ -645,7 +659,7 @@ async function viewReview(body, payload) {
     function showReviewPanel(name) {
         reviewPanel = name;
         if (name === 'review') v.fit();
-        else if (name === 'features' && active) focusFeature(active);
+        else if (active) focusFeature(active);
         v.redraw();
         body.querySelectorAll('[data-review-panel]').forEach(el => { el.hidden = el.dataset.reviewPanel !== name; });
         body.querySelectorAll('[data-review-tab]').forEach(el => el.setAttribute('aria-pressed', String(el.dataset.reviewTab === name)));
@@ -697,7 +711,8 @@ async function viewReview(body, payload) {
         const s = e.target.closest('[data-status]'), r = e.target.closest('[data-row]');
         if (s) {
             const id = s.dataset.id, status = s.dataset.status;
-            if (id !== active) return;
+            if (staged && phase === 'ready') return;
+            active = id;
             submitting = true; refresh();
             saving = saving.then(() => api('/api/intake/jobs/' + job.id + '/review', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({features: {[id]: {status}}})}))
                 .then(r => { edits = r.review.features; say('Decision saved.'); exports(); })
@@ -722,7 +737,7 @@ async function viewReview(body, payload) {
         if (clickMode === 'entrance') { action('entrance', {p: v.toM(p)}); return; }
         if (['building', 'bench', 'light'].includes(clickMode)) { outline.push(v.toM(p)); refresh(); return; }
         if (clickMode !== 'select') { if (p[0] >= 0 && p[1] >= 0 && p[0] < geometry.mosaic.width && p[1] < geometry.mosaic.height) { marks.push({kind: clickMode, p: v.toM(p).map(x => +x.toFixed(3)), guide: true}); refresh(); } return; }
-        const hit = target.closest?.('[data-f]'); if (hit && features().some(f => f.id === hit.dataset.f && visible(f))) { active = hit.dataset.f; showReviewPanel('features'); refresh(); document.querySelector('[data-row="' + active + '"]')?.scrollIntoView({block: 'nearest'}); }
+        const hit = target.closest?.('[data-f]'); if (hit && features().some(f => f.id === hit.dataset.f && visible(f))) { active = hit.dataset.f; showReviewPanel('review'); refresh(); document.querySelector('[data-row="' + active + '"]')?.scrollIntoView({block: 'nearest'}); }
     };
     let stroke = null;
     const bounded = p => [Math.max(0, Math.min(geometry.mosaic.width - 1, p[0])), Math.max(0, Math.min(geometry.mosaic.height - 1, p[1]))];

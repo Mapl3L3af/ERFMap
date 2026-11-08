@@ -194,3 +194,36 @@ header .brand{color:var(--accent)}
 .processing-state{min-height:200px}
 .processing-state h3{font-size:16px}
 .processing-orbit{width:24px;height:24px}
+/* Review checklist redesign */
+.review-stepper{display:flex;gap:6px;list-style:none;margin:0 0 10px;padding:0;counter-reset:st}
+.review-stepper li{flex:1;counter-increment:st;font-size:12px;color:var(--dim);border-bottom:3px solid var(--line);padding:4px 2px}
+
+.review-stepper li.done{color:var(--complete);border-color:var(--complete)}
+.review-stepper li.done::before{content:"✓ "}
+.review-stepper li.active{color:var(--text);border-color:var(--accent);font-weight:bold}
+.review-step-title{margin:4px 0 4px;font-size:17px}
+.review-progress{height:6px;background:#2a2a2a;border-radius:4px;overflow:hidden;margin:8px 0 4px}
+.review-progress i{display:block;height:100%;width:0;background:var(--accent);transition:width .2s}
+#reviewCounts{font-size:12px;color:var(--dim);margin:0 0 8px}
+#acceptAll{width:100%;margin-bottom:8px}
+.review-checklist{list-style:none;margin:0 0 10px;padding:0;max-height:42vh;overflow:auto;border:1px solid var(--line);border-radius:8px}
+.review-checklist li{display:grid;grid-template-columns:14px 1fr;gap:4px 8px;align-items:center;padding:8px;border-bottom:1px solid #2c2c2c;cursor:pointer;border-left:3px solid transparent}
+.review-checklist li:last-child{border-bottom:0}
+.review-checklist li.current{background:#222a1b;border-left-color:var(--accent)}
+.review-checklist li.accepted .item b::after{content:" ✓";color:var(--complete)}
+.review-checklist li.rejected{opacity:.5}.review-checklist li.rejected .item b{text-decoration:line-through}
+.review-checklist li.empty{display:block;color:var(--dim);cursor:default}
+.review-checklist .swatch{width:12px;height:12px;border-radius:3px;display:block}
+.review-checklist .item{display:flex;flex-direction:column;font-size:12px;color:var(--dim);min-width:0}
+.review-checklist .item b{color:var(--text);font-size:13px}
+.review-checklist select{grid-column:2;font-size:12px;padding:3px 6px}
+.review-checklist .decide{grid-column:2;display:flex;gap:6px}
+.review-checklist .decide button{flex:1;padding:4px 6px;font-size:12px}
+.decide .keep.on{background:#25381a;border-color:var(--complete);color:var(--complete)}
+.decide .drop-item.on{background:#3a1f1b;border-color:var(--failed);color:var(--failed)}
+.fix-tools{border:1px solid var(--line);border-radius:8px;padding:6px 8px;margin:8px 0}
+.fix-tools summary{cursor:pointer;color:var(--dim);font-size:13px}
+.fix-tools[open] summary{margin-bottom:6px}
+.step-actions{display:flex;flex-direction:column;gap:6px;margin-top:10px}
+.step-actions .primary{font-weight:bold;padding:9px;background:var(--accent);color:#111;border-color:var(--accent)}
+.step-actions .primary:disabled{background:#2a2a2a;color:var(--dim);border-color:var(--line);cursor:not-allowed}
