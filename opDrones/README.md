@@ -1,6 +1,6 @@
 # erfMap
 
-Run `node server.js` with Node 20 or later, or double-click **Start erfMap.command** on macOS. The app has no package installation step. Open the localhost address printed in the terminal. Teammates on the same network should use the network address printed there.
+Run `node server.js` with Node 20 or later, or double-click **Start erfMap.command** on macOS or **Start erfMap.cmd** on Windows. The app has no package installation step. Open the localhost address printed in the terminal. Teammates on the same network should use the network address printed there.
 
 **New Flyover** opens the video and photo intake flow. **Open Project** imports an exported scenario JSON, a raw survey, or a supported GeoJSON FeatureCollection. Importing creates a saved project. **Join Project** opens an existing project on this server using its four digit code. Four people can edit at once. Keep the server running while collaborating.
 
