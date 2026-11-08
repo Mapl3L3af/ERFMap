@@ -53,6 +53,8 @@ WORK_SIDE = 1024          # photos are analysed at this longest side
 CELLS = 14                # CLIP windows across the longest side
 PRIORITY = 0.8            # a higher-priority class wins when within this ratio of the best score
 MIN_ZONE = 0.002          # building, path and road pieces smaller than this share of the photo go to grass
+VEG_MIN, VEG_MAX = 0.02, 0.10   # limits for the per-photo greenness threshold
+PAVED = 0.6               # on bare (not green) ground, building/path/road wins when within this ratio of the best score
 POINT_MIN = 0.6           # a lamp post or bench needs at least this probability ...
 POINT_MARGIN = 2.0        # ... and this many times the best surface score
 
@@ -99,6 +101,21 @@ def fit_to_colour(mask, lab, allowed, steps):
     for _ in range(steps):                                   # grow only through matching pixels
         grown = cv2.dilate(grown, kernel) & match.astype(np.uint8)
     return core | (grown > 0)
+
+
+def vegetation(image):
+    """Green, living ground (grass, trees, bushes) by excess greenness, 2g - r - b in chromatic
+    coordinates, split at a threshold chosen per photo (Otsu), kept within sensible limits."""
+    f = cv2.bilateralFilter(image, 9, 40, 9).astype(np.float32) + 1
+    b, g, r = f[:, :, 0], f[:, :, 1], f[:, :, 2]
+    exg = (2 * g - r - b) / (b + g + r)
+    e8 = np.clip((exg + 0.2) / 0.6 * 255, 0, 255).astype(np.uint8)
+    t, _ = cv2.threshold(e8, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+    threshold = float(np.clip(t / 255 * 0.6 - 0.2, VEG_MIN, VEG_MAX))
+    veg = (exg > threshold).astype(np.uint8)
+    k = np.ones((5, 5), np.uint8)
+    veg = cv2.morphologyEx(cv2.morphologyEx(veg, cv2.MORPH_OPEN, k), cv2.MORPH_CLOSE, k)
+    return veg > 0
 
 
 def smooth_mask(mask, size):
@@ -177,10 +194,13 @@ def build_zones(image, probs, size, trees=None, votes=None):
     probs = snap_to_edges(image, probs, max(4, block // 6))
     b, pth, rd, gr, tr = (probs[:, :, CLASSES.index(c)] for c in CLASSES)
     best = probs.max(axis=2)
-    building = b >= PRIORITY * best
+    # Green pixels are grass or trees, whatever the coarse scores say: paving and roofs are never green.
+    # On bare ground the models choose between building, path and road, and are trusted more readily.
+    bare = ~vegetation(image)
+    building = bare & (b >= PAVED * best)
     # Where a tree crown is the best match, the ground under it is left to grass (the tree becomes a point),
     # so tree shadows and canopies are not mistaken for road.
-    line = ~building & (np.maximum(pth, rd) >= PRIORITY * best) & (tr < best)
+    line = bare & ~building & (np.maximum(pth, rd) >= PAVED * best) & (tr < best)
     path = line & (pth >= rd)
     road = line & (rd > pth)
 
@@ -190,18 +210,18 @@ def build_zones(image, probs, size, trees=None, votes=None):
     building = cv2.morphologyEx(building.astype(np.uint8), cv2.MORPH_CLOSE, small) > 0
     # Paths and roads are long and continuous: close small gaps along them, but never over a building.
     reach = np.ones((2 * k + 1, 2 * k + 1), np.uint8)
-    path = (cv2.morphologyEx(path.astype(np.uint8), cv2.MORPH_CLOSE, reach) > 0) & ~building
-    road = (cv2.morphologyEx(road.astype(np.uint8), cv2.MORPH_CLOSE, reach) > 0) & ~building
+    path = (cv2.morphologyEx(path.astype(np.uint8), cv2.MORPH_CLOSE, reach) > 0) & ~building & bare
+    road = (cv2.morphologyEx(road.astype(np.uint8), cv2.MORPH_CLOSE, reach) > 0) & ~building & bare
+    building &= bare
     lab = cv2.cvtColor(cv2.bilateralFilter(image, 7, 30, 7), cv2.COLOR_BGR2LAB).astype(np.float32) / 255
-    everywhere = np.ones((h, w), bool)
-    building = fit_to_colour(building, lab, everywhere, k)
-    path = fit_to_colour(path, lab, ~building & (pth >= rd), 2 * k)   # paths and roads may run on to their visible end,
+    building = fit_to_colour(building, lab, bare, k)
+    path = fit_to_colour(path, lab, bare & ~building & (pth >= rd), 2 * k)   # paths and roads may run on to their visible end,
                                                                       # but a path never flows into road-like ground
-    road = fit_to_colour(road, lab, ~building & ~path, 2 * k)
+    road = fit_to_colour(road, lab, bare & ~building & ~path, 2 * k)
     soft = max(1.0, k / 6)
-    building = smooth_mask(building, soft)
-    path = smooth_mask(path, soft) & ~building
-    road = smooth_mask(road, soft) & ~building & ~path
+    building = smooth_mask(building, soft) & bare
+    path = smooth_mask(path, soft) & ~building & bare
+    road = smooth_mask(road, soft) & ~building & ~path & bare
     both = path & road
     path &= ~(both & (probs[:, :, 2] > probs[:, :, 1]))
     road &= ~path
@@ -236,7 +256,7 @@ def build_zones(image, probs, size, trees=None, votes=None):
             regions.append(point_region(x / scale, y / scale, 'tree', conf, 2 * r / scale))
         return regions
     # Trees: one point per crown, wherever trees dominate (usually over grass).
-    tree = (tr >= PRIORITY * best) & ~building & ~path & ~road
+    tree = (tr >= PRIORITY * best) & ~bare
     tree = cv2.morphologyEx(tree.astype(np.uint8), cv2.MORPH_OPEN, small)
     crown = max(8, block // 2)
     # Pad with background first: otherwise OpenCV treats the photo edge as far from any edge,

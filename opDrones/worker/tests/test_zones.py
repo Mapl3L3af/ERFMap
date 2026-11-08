@@ -174,6 +174,26 @@ class OutlineTest(unittest.TestCase):
             self.assertGreater(iou, least, kind)
 
 
+    def test_paving_never_takes_green_ground_even_when_scores_are_too_wide(self):
+        image, probs = scene()
+        wide = np.zeros((H, W), np.uint8)
+        wide[0:600, 220:420] = 1                                       # scores say "path" 80 px either side of it
+        probs = probs.copy()
+        probs[wide > 0] = 0.1
+        probs[wide > 0, cz.CLASSES.index('path')] = 0.6
+        regions = cz.build_zones(image, probs, SIZE)
+        path = np.zeros((SIZE[1], SIZE[0]), np.uint8)
+        for r in regions:
+            if r.get('model_label') == 'path':
+                cv2.fillPoly(path, [np.round(np.array(r['polygon'])).astype(np.int32)], 1)
+        lawn = np.zeros_like(path)
+        lawn[0:1200, 440:580] = 1                                      # grass either side of the path (photo pixels),
+        lawn[0:760, 700:840] = 1                                       # leaving out the branch at y 800-860
+        lawn[900:1200, 700:840] = 1
+        self.assertLess((path & lawn).sum(), 0.02 * lawn.sum(), 'the path spreads onto the lawn')
+        self.assertGreater(path[0:1100, 610:670].mean(), 0.9, 'the path itself is kept')
+
+
 class CouncilTest(unittest.TestCase):
     def test_label_names_map_onto_our_classes(self):
         ids = cz.map_labels({0: 'wall', 1: 'building, edifice', 2: 'sidewalk, pavement', 3: 'grass', 4: 'tree', 5: 'sky', 6: 'road, route', 7: 'impervious surfaces'}, cz.SYNONYMS)
