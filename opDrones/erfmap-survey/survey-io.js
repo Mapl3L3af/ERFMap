@@ -91,7 +91,7 @@
         const assetMeta = {};
         for (const [id, a] of Object.entries(site.assets || {})) {
             const {data, ...meta} = a || {};
-            assetMeta[id] = meta;
+            assetMeta[id] = {...meta, keys: Object.keys(a || {})};
             if (a?.type !== 'image' || typeof data !== 'string' || !data.startsWith('data:image/')) continue;
             const {bytes, mime} = dataUrlToBytes(data);
             if (!samplers.length) samplers.push({magFilter: 9729, minFilter: 9987, wrapS: 33071, wrapT: 33071});
@@ -140,8 +140,10 @@
             const q = [[x, y], [x + 1, y], [x + 1, y + 1], [x, y + 1]].map(([i, j]) => [i * site.w / steps, j * site.h / steps]);
             ground.push(...[[q[0], q[1], q[2]], [q[0], q[2], q[3]]].map(t => t.map(p => [p[0], p[1], heightAt(p)])));
         }
-        const groundAsset = site.assets?.ortho && imageIndex.has('ortho') && site.showTextures !== false ? 'ortho' : null;
-        addMesh('Ground', ground, material('_ground', '#8f9a7c', groundAsset ? imageIndex.get('ortho') : null), groundAsset ? planar('ortho') : null,
+        // The ground shows the site's orthophoto: the survey's own 'ortho', an intake
+        // 'flyover', or any other image marked as an orthophoto.
+        const groundAsset = site.showTextures === false ? null : ['ortho', ...Object.keys(site.assets || {}).filter(id => site.assets[id]?.role === 'orthophoto' || id === 'flyover')].find(id => imageIndex.has(id)) || null;
+        addMesh('Ground', ground, material('_ground', '#8f9a7c', groundAsset ? imageIndex.get(groundAsset) : null), groundAsset ? planar(groundAsset) : null,
             {erfmap: {role: 'ground', samples: site.samples?.length || 0, note: site.samples?.length ? 'Relative heights from ground samples; local zero, not absolute elevation.' : 'Flat: no ground samples.'}});
         site.features.forEach((f, i) => {
             const g = geometryOf(f), color = colorOf(f), z = p => heightAt(p);
@@ -169,7 +171,7 @@
         });
         const {assets, ...rest} = site;
         const gltf = {
-            asset: {version: '2.0', generator: 'erfMap survey', extras: {erfmap: {format: FORMAT, version: VERSION, units: 'metres', axes: 'x east, y up, z south (survey y)', site: rest, assets: assetMeta}}},
+            asset: {version: '2.0', generator: 'erfMap survey', extras: {erfmap: {format: FORMAT, version: VERSION, units: 'metres', axes: 'x east, y up, z south (survey y)', site: rest, keys: Object.keys(site), assets: assetMeta}}},
             scene: 0, scenes: [{name: site.name, nodes: nodes.map((_, i) => i)}], nodes, meshes, materials, accessors, bufferViews, buffers: [{byteLength: offset}],
         };
         if (images.length) Object.assign(gltf, {images, textures, samplers});
@@ -252,12 +254,15 @@
             const missing = [];
             const assets = {};
             for (const [id, a] of Object.entries(meta.assets || {})) {
-                const {image, ...rest} = a;
+                const {image, keys, ...rest} = a;
                 const data = image != null ? imageData(image) : null;
                 if (image != null && !data) missing.push('image for asset "' + id + '"');
-                assets[id] = data ? {...rest, data} : rest;
+                const full = data ? {...rest, data} : rest;
+                assets[id] = Array.isArray(keys) ? Object.fromEntries([...keys.filter(k => k in full), ...Object.keys(full).filter(k => !keys.includes(k))].map(k => [k, full[k]])) : full;
             }
             if (Object.keys(assets).length) site.assets = assets;
+            // Put the survey's fields back in their saved order, so a re-saved JSON file diffs cleanly.
+            if (Array.isArray(meta.keys)) { const ordered = {}; for (const k of meta.keys) if (k in site) ordered[k] = site[k]; for (const k of Object.keys(site)) if (!(k in ordered)) ordered[k] = site[k]; for (const k of Object.keys(site)) delete site[k]; Object.assign(site, ordered); }
             // Node metadata wins where it disagrees, so per-item edits made in another
             // tool's extras panel are kept; geometry stays the survey's own.
             const ids = new Set(site.features.map(f => f._syncId).filter(Boolean));

@@ -31,6 +31,7 @@ async function home() {
         + '<section class="card upload-card"><div class="drop" id="drop"><h3>Drop your imagery here</h3><p>One video, or photos of the same site</p><label class="button primary" tabindex="0" id="filePicker">Choose video or photos<input type="file" id="video" multiple accept="video/*,image/*,.mp4,.mov,.mkv,.avi,.webm,.mts,.jpg,.jpeg,.png,.tif,.tiff,.webp" hidden></label><p class="cap" id="uploadName"></p><div class="bar" id="uploadBar" hidden><i style="width:0"></i></div></div>'
         + '<p id="uploadStatus" role="status"></p><p class="upload-tip">Have a known ground distance handy, such as a sidewalk width. You’ll use it to set the map’s scale.</p>'
         + '<details class="map-details"><summary>About your map</summary><p>Maps use local distances, with no GPS position or elevation. Camera angle and terrain can affect accuracy; results are not survey-grade.</p></details></section>'
+        + '<section class="card capture-guide"><small class="cap">DJI Neo 2 · before you fly</small><h3>Film for a clean map</h3><ol>' + S.CAPTURE_GUIDE.map(g => '<li><b>' + esc(g.title) + '</b><span>' + esc(g.body) + '</span></li>').join('') + '</ol><p class="cap">After upload, erfMap checks your footage and tells you what to refilm.</p></section>'
         + '<section class="recent-section"><h3>Recent flyovers</h3><ul class="jobs" id="jobs"><li>Loading flyovers…</li></ul></section>'
         + '<details class="setup-details"><summary>Processing setup</summary><div id="caps"><p>Checking the worker…</p></div></details></div>';
     const input = document.getElementById('video'), drop = document.getElementById('drop');
@@ -116,7 +117,7 @@ async function upload(files) {
 async function openJob(id) {
     document.getElementById('newJob').hidden = false;
     labels = (await api('/api/intake/labels')).labels;
-    app.innerHTML = '<div class="layout single-review"><aside><ol class="stages" id="stages"></ol><details class="source-details"><summary>Source imagery</summary><section id="original"></section></details></aside><section class="card" id="panel"><p>Loading…</p></section></div>';
+    app.innerHTML = '<div class="layout single-review"><aside><ol class="stages" id="stages"></ol><details class="source-details"><summary>Source imagery</summary><section id="original"></section></details><details class="capture-check" id="captureCheck" hidden><summary id="captureSummary"></summary><div id="captureBody"></div></details></aside><section class="card" id="panel"><p>Loading…</p></section></div>';
     const events = new EventSource('/api/intake/jobs/' + id + '/events');
     events.addEventListener('job', e => update(JSON.parse(e.data)));
     events.onerror = () => { if (!job) app.innerHTML = '<div class="note err">That intake job could not be opened.</div>'; };
@@ -150,9 +151,31 @@ function update(next) {
     if (previousSelected !== selected || shown[selected] !== key) { shown[selected] = key; delete results[selected]; renderPanel(); }
     else if (state.status === 'processing') renderHead();
 }
+// Footage check: once frames are scored (and aligned), say what to refilm.
+let captureKey = '';
+async function renderCapture() {
+    const box = document.getElementById('captureCheck');
+    if (!box || !job) return;
+    const ok = id => ['complete', 'needs_review'].includes(job.stages[id]?.status);
+    if (!ok('frames')) { box.hidden = true; return; }
+    const key = ['frames', 'correction', 'probe'].map(id => job.stages[id]?.finishedAt + job.stages[id]?.status).join('|');
+    if (key === captureKey) return;
+    if (captureKey) for (const id of ['probe', 'frames', 'correction']) delete results[id];   // a stage was rerun
+    captureKey = key;
+    try {
+        const [probe, frames, correction] = await Promise.all([ok('probe') ? stageData('probe') : null, stageData('frames'), ok('correction') ? stageData('correction') : null]);
+        const r = S.captureReport({probe, frames, correction});
+        document.getElementById('captureSummary').innerHTML = '<span class="capture-dot ' + (r.refilm ? 'refilm' : r.warnings ? 'warn' : 'ok') + '"></span>Footage check · ' + (r.refilm ? r.refilm + ' thing' + (r.refilm > 1 ? 's' : '') + ' to refilm' : r.warnings ? r.warnings + ' warning' + (r.warnings > 1 ? 's' : '') : 'looks good');
+        document.getElementById('captureBody').innerHTML = '<ul class="capture-issues">' + r.issues.map(i => '<li class="' + i.severity + '"><b>' + esc(i.title) + '</b><span>' + esc(i.detail) + '</span>' + (i.at ? '<span class="cap">At ' + esc(i.at) + '</span>' : '') + (i.refilm ? '<span class="refilm-tip">' + esc(i.refilm) + '</span>' : '') + '</li>').join('') + '</ul>'
+            + '<p class="cap">Not checked: ' + r.notChecked.map(esc).join(' ') + '</p>' + (r.refilm ? '<p><a class="button" href="/intake/">Upload new footage</a></p>' : '');
+        box.hidden = false;
+        if (r.refilm && !box.dataset.seen) { box.open = true; box.dataset.seen = '1'; }
+    } catch (e) { captureKey = ''; box.hidden = true; }
+}
 function renderStages() {
     const phase = ['probe', 'frames', 'correction'].includes(selected) ? 0 : selected === 'markers' ? 1 : selected === 'review' ? 3 : 2;
     const steps = ['Prepare imagery', 'Set the scale', 'Build the map', 'Review & finish'];
+    renderCapture();
     document.getElementById('stages').innerHTML = steps.map((title, i) => '<li class="' + (i < phase ? 'done' : i === phase ? 'active' : '') + '"' + (i === phase ? ' aria-current="step"' : '') + '><span class="step-number">' + (i < phase ? '✓' : i + 1) + '</span><span>' + title + '</span></li>').join('');
 }
 

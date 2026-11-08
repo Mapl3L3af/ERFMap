@@ -50,6 +50,10 @@ test('intake export carries the flyover photo, per-item texture mappings and sta
     assert.equal(back.report.complete, true);
     assert.deepEqual(back.site.features, site.features);
     assert.equal(back.site.assets.flyover.data, site.assets.flyover.data);
+    assert.equal(JSON.stringify(restore(back.site)), JSON.stringify(restore(site)), 'byte-identical, key order included');
+    const {json} = io.parseGlb(io.exportGlb(restore(site), {kinds}));
+    const ground = json.meshes[json.nodes.find(n => n.extras?.erfmap?.role === 'ground').mesh];
+    assert.ok(ground.primitives[0].attributes.TEXCOORD_0 != null, 'the ground carries the flyover photo');
 });
 
 test('reconstructed ground heights become relative survey samples with contours on', async t => {

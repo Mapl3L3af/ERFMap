@@ -323,5 +323,61 @@
         return out;
     }
 
-    return {STAGES, NO_ELEVATION, centroid, axis, shapeFor, sizeOf, reviewedFeatures, buildSite, modelSummary, triangulate, buildGlb, geometryOf, segmentPoint, pathEnds, edgeAccess};
+    // ------------------------------------------------------------------ capture
+    // Short DJI Neo 2 flight guide shown before upload. The current map uses the
+    // overhead pass; angled passes feed 3D reconstruction when it is connected.
+    const CAPTURE_GUIDE = [
+        {title: 'Fly slowly in straight, overlapping passes', body: 'Walking pace (about 2 m/s). Fly parallel lines like mowing a lawn, each one overlapping the last by about two thirds of the picture. Start and end every pass past the edge of the site.'},
+        {title: 'One overhead pass, then angled passes', body: 'Overhead: tilt the gimbal straight down (−90°) at a steady height, 15–30 m above the tallest object and within local rules. Angled: tilt to about −45° and circle or cross the site so building sides and tree crowns are seen from several directions.'},
+        {title: 'Avoid blur', body: 'Fly in good daylight; overcast is ideal. Record 4K at 30 fps, keep the horizon out of overhead shots, slow down before turns and pause for a second at the end of each pass.'},
+        {title: 'Avoid gaps', body: 'Keep the camera on the ground at all times, cover the corners twice, and don’t skip over areas hidden by trees. A known distance on the ground (a sidewalk width or a tape) sets the scale.'},
+    ];
+    function runs(frames, test) {
+        const out = [];
+        let start = null, last = null;
+        for (const f of frames) {
+            if (test(f)) { if (!start) start = f; last = f; }
+            else if (start) { out.push([start, last]); start = null; }
+        }
+        if (start) out.push([start, last]);
+        return out;
+    }
+    const clock = s => Math.floor(s / 60) + ':' + String(Math.floor(s % 60)).padStart(2, '0');
+    function where(frames, test) {
+        const ranges = runs(frames, test);
+        if (!ranges.length) return '';
+        const timed = frames.some(f => f.time_s != null);
+        return ranges.slice(0, 6).map(([a, b]) => timed ? (a === b ? clock(a.time_s) : clock(a.time_s) + '–' + clock(b.time_s)) : (a === b ? (a.source || a.id) : (a.source || a.id) + ' to ' + (b.source || b.id))).join(', ') + (ranges.length > 6 ? ' and ' + (ranges.length - 6) + ' more' : '');
+    }
+    // Detectable problems after upload, each with what to refilm.
+    function captureReport({probe, frames, correction} = {}) {
+        const issues = [], list = frames?.frames || [];
+        const meta = probe?.metadata || {}, photos = !list.some(f => f.time_s != null);
+        const share = flag => list.length ? list.filter(f => (f.flags || []).some(x => x.startsWith(flag))).length / list.length : 0;
+        const add = (severity, title, detail, refilm, at) => issues.push({severity, title, detail, refilm, at: at || ''});
+        const duration = meta.duration_s ?? meta.duration;
+        if (!photos && duration && duration < 20) add('refilm', 'Video is short', 'Only ' + duration.toFixed(0) + ' s of footage, which rarely covers a site with enough overlap.', 'Fly the full pattern: one overhead lawnmower pass and one angled pass, usually 1–3 minutes.');
+        if (meta.width && Math.max(meta.width, meta.height || 0) < 1920) add('warn', 'Low resolution', meta.width + '×' + meta.height + ' limits detail for small items like benches and lights.', 'Record at 4K in the DJI Fly app.');
+        const blur = share('blurry');
+        if (blur > 0) add(blur > .25 ? 'refilm' : 'warn', 'Blurred frames', Math.round(blur * 100) + '% of ' + (photos ? 'photos' : 'sampled frames') + ' are blurred' + (photos ? '.' : ', usually from fast turns or low light.'), 'Refly these parts slower and in better light; pause at the end of each pass.', where(list, f => (f.flags || []).includes('blurry')));
+        const dark = share('dark') + share('overexposed');
+        if (dark > .1) add('warn', 'Exposure problems', Math.round(dark * 100) + '% of frames are too dark or blown out.', 'Fly in even daylight; avoid low sun and dusk, and lock exposure if the app allows it.', where(list, f => (f.flags || []).some(x => x === 'dark' || x === 'overexposed')));
+        const sky = share('tilted');
+        if (sky > .1) add(sky > .4 ? 'refilm' : 'warn', 'Sky in view', Math.round(sky * 100) + '% of frames show the horizon, so they cannot be used for the overhead map.', 'For the overhead pass, tilt the gimbal straight down (−90°). Keep angled passes separate.', where(list, f => (f.flags || []).some(x => x.startsWith('tilted'))));
+        const flat = share('low texture');
+        if (flat > .2) add('warn', 'Featureless ground', Math.round(flat * 100) + '% of frames show little texture (water, uniform lawn, glare), which makes alignment unreliable.', 'Fly a little higher so each frame includes paths, edges or buildings.', where(list, f => (f.flags || []).includes('low texture')));
+        if (correction?.frames?.length) {
+            const aligned = correction.frames.filter(f => f.to_mosaic).length, total = correction.frames.length;
+            const weak = (correction.links || []).filter(l => !l.ok || l.inliers < 60);
+            if (aligned < total) {
+                const out = new Set(correction.frames.filter(f => !f.to_mosaic).map(f => f.id));
+                add(aligned < .6 * total ? 'refilm' : 'warn', 'Gaps in overlap', (total - aligned) + ' of ' + total + ' usable frames could not be joined to the rest, so parts of the site may be missing from the map.', 'Refly those sections more slowly with more overlap between passes, and keep the camera pointed at the ground through turns.', where(list.filter(f => f.usable !== false), f => out.has(f.id)));
+            } else if (weak.length > Math.max(2, .2 * (correction.links || []).length)) add('warn', 'Thin overlap', weak.length + ' neighbouring frames share few matching details.', 'Slow down or fly lower so consecutive frames overlap by about two thirds.');
+        }
+        if (!issues.length && list.length) add('ok', 'Footage looks usable', (photos ? list.length + ' photos' : list.length + ' sampled frames') + ' passed the blur, exposure, tilt and overlap checks.', '');
+        const notChecked = ['Angled coverage of building sides cannot be detected yet; it matters once 3D reconstruction is connected.', 'Ground hidden under trees and outside the frame is never checked.'];
+        return {issues, refilm: issues.filter(i => i.severity === 'refilm').length, warnings: issues.filter(i => i.severity === 'warn').length, notChecked};
+    }
+
+    return {STAGES, NO_ELEVATION, CAPTURE_GUIDE, captureReport, centroid, axis, shapeFor, sizeOf, reviewedFeatures, buildSite, modelSummary, triangulate, buildGlb, geometryOf, segmentPoint, pathEnds, edgeAccess};
 });
