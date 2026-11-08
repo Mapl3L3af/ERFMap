@@ -144,6 +144,22 @@ def classifier_command():
     return None
 
 
+def zones_command():
+    """ERFMAP_SEGMENTER if set, else the bundled model council (CLIP, SegFormer, DeepForest: whichever are installed). ERFMAP_ZONES=off disables it."""
+    configured = os.environ.get('ERFMAP_SEGMENTER', '').strip()
+    if configured:
+        return configured
+    if os.environ.get('ERFMAP_ZONES', '').strip().lower() in ('off', 'none', '0'):
+        return None
+    if os.environ.get('ERFMAP_CLASSIFIER', '').strip().lower() in ('off', 'none', '0'):
+        return None
+    import importlib.util
+    if importlib.util.find_spec('torch') and (importlib.util.find_spec('open_clip') or importlib.util.find_spec('transformers')):
+        script = Path(__file__).resolve().parent / 'adapters' / 'clip_zones.py'
+        return subprocess.list2cmdline([sys.executable, str(script)]) if os.name == 'nt' else '"%s" "%s"' % (sys.executable, script)
+    return None
+
+
 def capabilities():
     ffmpeg, ffprobe = tool('ffmpeg'), tool('ffprobe')
     return {
@@ -154,7 +170,7 @@ def capabilities():
         'ffprobe_path': ffprobe,
         'numpy': np is not None,
         'opencv': cv2.__version__ if cv2 is not None else None,
-        'segmenter': os.environ.get('ERFMAP_SEGMENTER') or None,
+        'segmenter': zones_command(),
         'classifier': classifier_command(),
     }
 
@@ -876,15 +892,22 @@ def stage_regions(job):
     need_cv()
     out = stage_dir(job, 'regions')
     frames = keyframes(job)
-    segmenter = os.environ.get('ERFMAP_SEGMENTER')
-    method = 'external segmenter: ' + segmenter if segmenter else 'baseline colour clustering (OpenCV k-means). Not SAM 2.'
-    regions = []
+    segmenter = zones_command()
+    builtin = bool(segmenter) and 'clip_zones.py' in segmenter and not os.environ.get('ERFMAP_SEGMENTER')
+    method = ('Model council (CLIP, SegFormer and DeepForest, whichever are installed) in two stages: zone polygons in priority order (buildings, then paths and roads, then grass as the fallback), then points for trees, lamp posts and benches' if builtin
+              else 'external segmenter: ' + segmenter if segmenter else 'baseline colour clustering (OpenCV k-means). Not SAM 2.')
+    regions, model = [], None
     if segmenter:
-        progress(.1, 'Running external segmenter')
+        progress(.1, 'Mapping zones and points with the model council (up to a minute per photo)' if builtin else 'Running external segmenter')
         reply = external(segmenter, {'job': str(Path(job).resolve()), 'frames': [{'id': f['id'], 'image': str((Path(job) / f['after']).resolve())} for f in frames]}, 'Segmenter')
+        model = reply.get('model')
         for r in reply.get('regions', []):
             if r.get('frame') in {f['id'] for f in frames} and len(r.get('polygon', [])) >= 3:
-                regions.append({'frame': r['frame'], 'polygon': r['polygon'], 'area_px': polygon_area(r['polygon']), 'mean_rgb': r.get('mean_rgb'), 'score': r.get('score')})
+                region = {'frame': r['frame'], 'polygon': r['polygon'], 'area_px': polygon_area(r['polygon']), 'mean_rgb': r.get('mean_rgb'), 'score': r.get('score')}
+                for key in ('label', 'model_label', 'confidence', 'role', 'point', 'votes', 'line', 'width'):
+                    if r.get(key) is not None:
+                        region[key] = r[key]
+                regions.append(region)
     else:
         for i, f in enumerate(frames):
             for r in baseline_regions(imread(Path(job) / f['after'])):
@@ -892,9 +915,9 @@ def stage_regions(job):
             progress((i + 1) / len(frames), 'Segmenting keyframe %d of %d' % (i + 1, len(frames)))
     for n, r in enumerate(regions):
         r['id'] = 'R%d' % (n + 1)
-    warnings = [] if segmenter else ['Regions come from colour clustering, which splits shadows and merges similar-looking surfaces. Configure ERFMAP_SEGMENTER for a learned segmenter such as SAM 2.']
+    warnings = [] if segmenter else ['Regions come from colour clustering, which splits shadows and merges similar-looking surfaces. Install the free CLIP model (pip install open_clip_torch) or configure ERFMAP_SEGMENTER.']
     return {'status': 'complete' if regions else 'needs_review', 'summary': '%d candidate regions in %d keyframes' % (len(regions), len(frames)),
-            'method': method, 'keyframes': [{'id': f['id'], 'image': f['after'], 'width': f['width'], 'height': f['height']} for f in frames], 'regions': regions, 'warnings': warnings}
+            'method': method, 'model': model, 'keyframes': [{'id': f['id'], 'image': f['after'], 'width': f['width'], 'height': f['height']} for f in frames], 'regions': regions, 'warnings': warnings}
 
 
 # ---------------------------------------------------------------- 5. classification
@@ -930,6 +953,24 @@ def stage_classification(job):
             cv2.imwrite(str(path), crop)
         payload.append({'id': r['id'], 'frame': r['frame'], 'crop': str(path.resolve()), 'polygon': r['polygon'], 'mean_rgb': r.get('mean_rgb'), 'area_px': r['area_px']})
         progress(.3 * (i + 1) / max(1, len(reg['regions'])), 'Preparing region crops')
+    if reg['regions'] and all(r.get('label') for r in reg['regions']):
+        # The segmenter already labelled every region (CLIP zones and points): no separate classifier pass.
+        predictions = []
+        for r in reg['regions']:
+            kind = label_map.get(r['label'], r['label'])
+            conf = r.get('confidence')
+            conf = float(conf) if isinstance(conf, (int, float)) else None
+            kind = kind if kind in kinds else None
+            votes = r.get('votes') or {}
+            split = len(votes) > 1 and max(votes.values()) - min(votes.values()) > 0.3     # council members disagree
+            predictions.append({'id': r['id'], 'kind': kind, 'model_label': r.get('model_label') or r['label'], 'confidence': conf, 'role': r.get('role'),
+                                'votes': votes or None, 'disagreement': split,
+                                'needs_review': kind is None or conf is None or conf < UNCERTAIN_BELOW or split})
+        uncertain = sum(p['needs_review'] for p in predictions)
+        points = sum(1 for p in predictions if p.get('role') in ('point', 'object'))
+        return {'status': 'needs_review' if uncertain else 'complete',
+                'summary': '%d zones and %d points labelled during region detection, %d need review' % (len(predictions) - points, points, uncertain),
+                'model': reg.get('model'), 'predictions': predictions, 'uncertain_below': UNCERTAIN_BELOW, 'warnings': []}
     if not classifier:
         predictions = [{'id': r['id'], 'kind': None, 'model_label': None, 'confidence': None, 'needs_review': True} for r in reg['regions']]
         return {'status': 'unavailable', 'summary': 'No classifier configured. All %d regions are unlabelled and need review.' % len(predictions),
@@ -970,6 +1011,36 @@ def stage_classification(job):
 
 
 # ---------------------------------------------------------------- 6. merging
+def keyhole(outer, holes):
+    """One simple polygon for an area with holes: each hole is joined to the outline by a zero-width cut."""
+    ring = [tuple(p) for p in outer]
+    for hole in holes:
+        hole = [tuple(p) for p in hole]
+        _, i, j = min(((a[0] - b[0]) ** 2 + (a[1] - b[1]) ** 2, i, j) for i, a in enumerate(ring) for j, b in enumerate(hole))
+        ring = ring[:i + 1] + hole[j:] + hole[:j + 1] + ring[i:]
+    return ring
+
+
+def mask_outline(mask, s, holes=False):
+    """Outline of the largest piece of a mask, in mosaic pixels; with holes=True, holes are kept as keyhole cuts."""
+    contours, hierarchy = cv2.findContours(mask, cv2.RETR_CCOMP if holes else cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return None
+    outers = [i for i in range(len(contours)) if not holes or hierarchy[0][i][3] == -1]
+    i = max(outers, key=lambda i: cv2.contourArea(contours[i]))
+    approx = cv2.approxPolyDP(contours[i], max(1.0, 0.002 * max(mask.shape)), True).reshape(-1, 2)   # keep curves
+    if len(approx) < 3:
+        return None
+    inner = []
+    c = hierarchy[0][i][2] if holes else -1
+    while c != -1:
+        h = cv2.approxPolyDP(contours[c], 2, True).reshape(-1, 2)
+        if len(h) >= 3 and cv2.contourArea(h.astype(np.float32)) > 16:
+            inner.append(h)
+        c = hierarchy[0][c][0]
+    return (np.array(keyhole(approx, inner), dtype=np.float64) / s).round(1).tolist()
+
+
 def join_blocks(merged, size, s, per_image=False):
     """Join touching features of one base kind into one block (within one photo when photos are calibrated separately)."""
     if per_image:
@@ -1024,18 +1095,24 @@ def stage_merging(job):
         poly = apply_h(to_mosaic[r['frame']], r['polygon'])
         mask = np.zeros((size[1], size[0]), np.uint8)
         cv2.fillPoly(mask, [np.round(poly * s).astype(np.int32)], 1)
+        if r.get('point'):
+            q = np.round(apply_h(to_mosaic[r['frame']], [r['point']])[0] * s).astype(int)
+            cv2.circle(mask, (int(q[0]), int(q[1])), 2, 1, -1)     # points stay however small they are
         if mask.sum() < 4:
             continue
         if preds.get(r['id'], {}).get('omit'):
             omitted += 1
             continue
-        items.append({'region': r, 'poly': poly, 'mask': mask.astype(bool), 'pred': preds.get(r['id'], {})})
+        items.append({'region': r, 'poly': poly, 'mask': mask.astype(bool), 'pred': preds.get(r['id'], {}), 'role': r.get('role'),
+                      'point': apply_h(to_mosaic[r['frame']], [r['point']])[0] if r.get('point') else None,
+                      'line': apply_h(to_mosaic[r['frame']], r['line']) if r.get('line') else None,
+                      'width': r['width'] * math.sqrt(abs(np.linalg.det(np.asarray(to_mosaic[r['frame']], float)[:2, :2]))) if r.get('width') else None})
     items.sort(key=lambda it: -it['mask'].sum())
     clusters = []
     for n, it in enumerate(items):
         best, best_iou = None, 0.3
         for c in clusters:
-            if any(m['region']['frame'] == it['region']['frame'] for m in c['members']):
+            if any(m['region']['frame'] == it['region']['frame'] for m in c['members']) or c['members'][0]['role'] != it['role']:
                 continue
             inter = np.logical_and(c['union'], it['mask']).sum()
             iou = inter / max(1, np.logical_or(c['seed'], it['mask']).sum())
@@ -1049,18 +1126,18 @@ def stage_merging(job):
             best['votes'] += it['mask']
             best['ious'].append(float(best_iou))
         progress(.8 * (n + 1) / max(1, len(items)), 'Matching region %d of %d across frames' % (n + 1, len(items)))
+    # Zones and points from a two-stage segmenter keep their own outlines: zones already
+    # tile each photo without overlaps (holes included), and points carry their location.
+    zoned = any(it['role'] in ('zone', 'point') for it in items)
     merged = []
     for n, c in enumerate(clusters):
-        need = math.ceil(len(c['members']) / 2)
-        consensus = (c['votes'] >= need).astype(np.uint8)
-        contours, _ = cv2.findContours(consensus, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        if not contours:
-            continue
-        contour = max(contours, key=cv2.contourArea)
-        approx = cv2.approxPolyDP(contour, 0.006 * cv2.arcLength(contour, True), True).reshape(-1, 2)
-        if len(approx) < 3:
-            continue
-        polygon = (approx / s).round(1).tolist()
+        if len(c['members']) == 1:
+            polygon = c['members'][0]['poly'].round(1).tolist()
+        else:
+            need = math.ceil(len(c['members']) / 2)
+            polygon = mask_outline((c['votes'] >= need).astype(np.uint8), s, holes=zoned)
+            if polygon is None:
+                continue
         votes = {}
         for m in c['members']:
             k = m['pred'].get('kind')
@@ -1075,6 +1152,9 @@ def stage_merging(job):
         flags = []
         if len(kinds) > 1:
             flags.append('conflicting labels: ' + ', '.join(kinds))
+        split = [m['pred']['votes'] for m in c['members'] if m['pred'].get('disagreement')]
+        if split:
+            flags.append('models disagree: ' + ', '.join('%s %.0f%%' % (k, v * 100) for k, v in split[0].items()))
         if c['ious'] and np.mean(c['ious']) < 0.5:
             flags.append('geometry varies between frames')
         if len(c['members']) == 1:
@@ -1085,7 +1165,17 @@ def stage_merging(job):
                        'members': [m['region']['id'] for m in c['members']], 'frames': sorted({m['region']['frame'] for m in c['members']}),
                        'mean_iou': round(float(np.mean(c['ious'])), 3) if c['ious'] else None, 'flags': flags,
                        'member_polygons': [{'region': m['region']['id'], 'frame': m['region']['frame'], 'polygon': m['poly'].round(1).tolist()} for m in c['members']]})
-    merged = join_blocks(merged, size, s, per_image=corr.get('layout') == 'sheet')
+        located = [m['point'] for m in c['members'] if m['point'] is not None]
+        if located:
+            merged[-1]['point'] = np.mean(located, axis=0).round(1).tolist()
+        if c['members'][0]['role']:
+            merged[-1]['role'] = c['members'][0]['role']
+        traced = [m for m in c['members'] if m['line'] is not None]
+        if traced:                                   # a centre line traced by the segmenter (paths)
+            merged[-1]['line'] = traced[0]['line'].round(1).tolist()
+            merged[-1]['width_px'] = round(float(traced[0]['width']), 1)
+    if not zoned:
+        merged = join_blocks(merged, size, s, per_image=corr.get('layout') == 'sheet')
     conflicts = sum(1 for m in merged if any(f.startswith('conflicting') or f.startswith('geometry') for f in m['flags']))
     return {'status': 'needs_review' if conflicts else 'complete', 'summary': '%d regions merged into %d features, %d with conflicts' % (len(items), len(merged), conflicts) + (', %d omitted by the classifier' % omitted if omitted else ''),
             'mosaic': corr['mosaic'], 'layout': corr.get('layout'), 'merged': merged, 'warnings': []}
@@ -1211,6 +1301,12 @@ def geometry_per_image(job, merged, labels, calibration):
         kind = g['kind'] or 'unknown'
         geometry = labels.get(kind, {}).get('geometry', 'area')
         p, width, note = shape_of(poly, geometry)
+        if geometry == 'point' and g.get('point'):
+            p, note = [to_m(g['point'])], 'Point placed at the feature\'s visible location.'
+        if geometry == 'line' and g.get('line'):
+            p = [to_m(q) for q in g['line']]
+            width = round(g['width_px'] * i['k'] * m_common, 2)
+            note = 'Centre line fitted with straight segments; width is the average across the path, %.1f m.' % width
         a, b = to_m(i['a']), to_m(i['b'])
         segment_m = i['metres']
         distance = segment_distance(poly.mean(axis=0), a, b)
@@ -1224,7 +1320,7 @@ def geometry_per_image(job, merged, labels, calibration):
                          'image': {'frame': i['frame'], 'source': i['source']},
                          'calibration': {'id': i['reference'], 'metres': round(i['metres'], 4), 'label': i['label'], 'segment_px': i['segment_px'],
                                          'm_per_px': round(i['m_per_px'], 6), 'distance_from_reference_m': round(distance, 2), 'flags': i['flags']}})
-    features.sort(key=lambda f: f['kind'] not in BASE_KINDS)    # base surfaces first, features on top after
+    features.sort(key=lambda f: (f['geometry'] == 'point', f['kind'] not in BASE_KINDS))    # zones first, points on top after
     warnings = ['Locally scaled, unreferenced: each photo has its own scale from one measured distance and its own arbitrary origin. Photos are placed side by side; their real positions relative to each other are unknown. North is unknown, and perspective, terrain, tilt and lens effects are not removed.',
                 'One distance calibrates scale near the measured segment. Sizes further away in the same photo are approximate.']
     if missing:
@@ -1270,12 +1366,18 @@ def stage_geometry(job):
         kind = g['kind'] or 'unknown'
         geometry = labels.get(kind, {}).get('geometry', 'area')
         p, width, note = shape_of(poly, geometry)
+        if geometry == 'point' and g.get('point'):
+            p, note = [[g['point'][0] * m_per_px, g['point'][1] * m_per_px]], 'Point placed at the feature\'s visible location.'
+        if geometry == 'line' and g.get('line'):
+            p = [[q[0] * m_per_px, q[1] * m_per_px] for q in g['line']]
+            width = round(g['width_px'] * m_per_px, 2)
+            note = 'Centre line fitted with straight segments; width is the average across the path, %.1f m.' % width
         features.append({'id': g['id'], 'kind': kind, 'predicted_kind': g['kind'], 'geometry': geometry, 'p': p,
                          'region': poly.tolist(), 'width_m': width,
                          'pixel_polygon': g['polygon'], 'confidence': g['confidence'], 'frames': g['frames'],
                          'flags': g['flags'] + ([] if g['kind'] else ['needs label']), 'note': note,
                          'area_m2': round(polygon_area(poly), 2)})
-    features.sort(key=lambda f: f['kind'] not in BASE_KINDS)    # base surfaces first, features on top after
+    features.sort(key=lambda f: (f['geometry'] == 'point', f['kind'] not in BASE_KINDS))    # zones first, points on top after
     allp = np.concatenate([np.array(f['p']) for f in features]) if features else np.zeros((1, 2))
     origin = allp.min(axis=0) - 2
     for f in features:

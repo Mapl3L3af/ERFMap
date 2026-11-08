@@ -163,7 +163,9 @@
                 const ia = idx[(i + idx.length - 1) % idx.length], ib = idx[i], ic = idx[(i + 1) % idx.length];
                 const a = poly[ia], b = poly[ib], c = poly[ic];
                 if (cross(a, b, c) <= 1e-12) continue;
-                if (idx.some(j => j !== ia && j !== ib && j !== ic && inTri(poly[j], a, b, c))) continue;
+                // Skip vertices that sit on a corner: an area with holes is one outline with zero-width cuts, so cut ends repeat.
+                const corner = p => [a, b, c].some(q => q[0] === p[0] && q[1] === p[1]);
+                if (idx.some(j => j !== ia && j !== ib && j !== ic && !corner(poly[j]) && inTri(poly[j], a, b, c))) continue;
                 out.push([ia, ib, ic]); idx.splice(i, 1); clipped = true; break;
             }
             if (!clipped) break;   // degenerate: fall back to a fan for the rest

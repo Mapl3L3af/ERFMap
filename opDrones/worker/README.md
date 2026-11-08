@@ -25,7 +25,7 @@ Set these before starting the server; the worker inherits the server's environme
 | 1. Frame selection | Video: FFmpeg samples up to 60 frames (at most 2 per second). Photos: each photo becomes a frame, downsized to 2000 px on the long side, and only clearly blurry or dark photos are dropped. OpenCV scores sharpness (Laplacian variance), brightness, contrast and edge texture. Frames are flagged as blurry, dark, overexposed, low texture or tilted (bright, featureless sky band). | Works. Tilt is a heuristic because the worker does not parse gimbal telemetry. |
 | 2. Image correction | CLAHE contrast equalisation and light denoising, with before/after previews. Lens correction runs only if `camera.json` (`fx`, `fy`, `cx`, `cy`, `dist`) is in the job folder. **Video:** ORB feature matching and RANSAC homographies chain each frame to a middle reference frame, giving a planar alignment preview. **Photos:** not stitched. Each photo is calibrated on its own, so the photos are laid out side by side on a photo sheet. | Works. Lens correction is unavailable without calibration. The video preview is not an orthomosaic. |
 | Scale calibration | **Photos:** one measured distance per photo. The reviewer picks a photo, clicks the two ends of something measured on the ground (sidewalk width, tape, two cones) and enters the length in ft, in, m or cm. Points and distance can be redone or edited. Photos without one are left out of the map. Segments are flagged when short (under 10% of the photo), near the photo edge, leaving the photo, ending on a featureless spot, or in a blurry or tilted photo. **Video:** measured distances and square boards (detected, then confirmed by the reviewer); the scale is their median. | Works. The scale comes only from what the reviewer enters and confirms. |
-| 3. Region detection | Baseline: k-means colour clustering on up to 10 keyframes, turned into polygons. Or `ERFMAP_SEGMENTER`. | Baseline works. It is not a learned model. |
+| 3. Region detection | With `open_clip_torch` installed: CLIP zones and points (below), which also label each region. Otherwise k-means colour clustering, or `ERFMAP_SEGMENTER`. Up to 10 video keyframes, or every photo. | Works. Neither is a model trained on drone surveys. |
 | 4. Classification | The bundled CLIP zero-shot adapter (`adapters/clip_classifier.py`) runs automatically once `open_clip_torch` is installed, or any command set in `ERFMAP_CLASSIFIER`. Predictions below 0.6 confidence, or with no label, are marked for review. | **Unavailable** until one is installed. Regions stay unlabelled, and the reviewer labels them. |
 | 5. Cross-frame merging | Regions are warped into the preview, matched by IoU over 0.3 (one per frame) and merged by majority vote. Label conflicts, varying geometry and single-frame detections are flagged. | Works |
 | 6. Map geometry | **Photos:** each photo's features are scaled by that photo's own distance; no scale is shared between photos. Photos are placed side by side in the output, because their real positions relative to each other are unknown. Each feature keeps its source photo, its calibration, its approximate size and its distance from the reference segment, and is flagged when it is far from it. **Video:** metres per preview pixel is the median over confirmed markers and measured distances, and disagreement is reported. Areas stay polygons, lines become the long axis of the region and points become centroids, following erfMap's `kinds` geometry. | Works once a photo (or the video) has a scale |
@@ -49,21 +49,43 @@ Both adapters are shell commands. They receive JSON on stdin and must print JSON
 
 Labels are mapped to erfMap kinds through `intake/label-map.json`. A label that already matches a kind needs no entry. Unmapped labels become unknown and are flagged for review. To extend the label set, add kinds to `erfmap-survey/model.js` (the UI reads them from there) and map new model labels in `label-map.json`.
 
-### Free classifier: CLIP zero-shot
+### Free labelling: a council of models, zones then points
 
 ```
-pip install open_clip_torch pillow
+pip install open_clip_torch pillow      # CLIP: zones, lamp posts, benches
+pip install transformers                # SegFormer: a per-pixel scene model (zones, benches, street lights)
+pip install deepforest                  # DeepForest: tree crowns, trained on aerial and drone imagery
 ```
 
-Then restart the server. The Classification stage picks it up by itself; the worker status on the intake home page shows it as the classifier. Set `ERFMAP_CLASSIFIER=off` to turn it off, or to any other command to use a different model.
+Install any of them; the ones that are missing sit out (the run's model note lists who voted). Restart the server and region detection and classification pick it up by themselves. All are free and run on your own computer; each downloads its weights from Hugging Face on first use (CLIP about 600 MB, SegFormer b2 about 100 MB, DeepForest about 130 MB).
 
+How the council votes (`adapters/clip_zones.py`):
+- **Zones:** CLIP and SegFormer each give every pixel a probability for building, path, road, grass and tree. They are averaged with `WEIGHTS`. SegFormer's own labels are mapped by name (`SYNONYMS`); where it sees something we don't map (sky, water) it does not vote there. DeepForest crowns pull their pixels towards tree (`TREE_WEIGHT`).
+- **Trees:** with DeepForest installed, each detected crown (score at least `TREE_MIN`) becomes a tree point. Without it, crowns are found in the combined tree scores.
+- **Lamp posts and benches:** one member must be at least 0.6 sure; the confidence is the average of every member's score at that spot, so a lone vote ends up in review.
+- Each zone and point keeps every member's score (`votes`). Where members differ by more than 30 points the feature is flagged "models disagree" in Review.
+
+Swap or leave out members with `ERFMAP_CLIP=off`, `ERFMAP_SEGFORMER=off`, `ERFMAP_DEEPFOREST=off`, `ERFMAP_SEGFORMER_MODEL` (any Hugging Face semantic segmentation model, for example one trained on aerial imagery; its label names are matched through `SYNONYMS`), `ERFMAP_DEEPFOREST_MODEL`, `ERFMAP_CLIP_MODEL` and `ERFMAP_CLIP_PRETRAINED`.
+
+None of these models was trained on this kind of site: SegFormer's default (ADE20K) is ground-level scenes and CLIP is web photos. DeepForest expects about 10 cm per pixel, so it suits drone photos better than satellite images. On satellite images (30 to 50 cm per pixel) benches and lamp posts are a few pixels and will mostly be missed.
+
+Zones and points are then built in two stages:
+
+1. **Zones (polygons), in priority order.** A grid of overlapping windows is scored by CLIP as building, path, road, grass or tree, and the scores are smoothed with an edge-aware (guided) filter so boundaries move onto visible edges instead of following the window grid. Each building, path and road then flows along its own colour for a short distance (`fit_to_colour`), so curves and visible ends are followed, and outlines are rounded slightly. A per-photo greenness check (`vegetation`, excess green with an automatic threshold) keeps buildings, paths and roads off green pixels, so coarse scores cannot spread paving over lawns.
+   - Buildings are reserved first, each traced as its own footprint.
+   - Paths and roads come next, as separate classes covering their full width. Gaps along them are closed so they stay continuous through bends and junctions, and a zone that touches the photo edge is carried exactly to the edge. A path that ends inside the photo stops there.
+   - Grass is the fallback for everything left. A path or road that crosses a lawn splits it into separate grass polygons, and a lawn around a building keeps a hole for it, so zones never overlap.
+   A higher-priority class wins where its score is within 80% of the best (`PRIORITY`). Buildings are squared up: each side is a best-fit straight line along or across the building's main direction, and sides meet at 90 degrees (`square_up`). Most roofs have a frame, a straight edge around the outside: long straight edges on bare ground are found (`frame_edges`), a bare, rectangular, not path-thin area whose outline mostly sits on them becomes a building even when the scores only lean that way (`framed`, `FRAME_LEAN`), and a building side with a frame edge along it is pinned to that edge. Paths are exported as erfMap `path` lines: the centre line is traced (`thin`, `trace`), split into straight segments, each a least-squares line (`fit_polyline`), carried to the photo edge where the path leaves it, and given the path's average width. Paths broken by shade, a tree or a coarse score are joined (`connect_paths`): two ends that point at each other within 35 degrees and 15% of the photo are joined into one line and the gap is filled in as path, and an end pointing at the side of another path within three path widths is carried on to meet it. Gaps never cross a building.
+2. **Points.** Trees (from tree-dominated areas, one per crown), lamp posts and benches each become one point at their visible location. A lamp post or bench needs at least 0.6 and twice the best surface score (`POINT_MIN`, `POINT_MARGIN`), so expect to add some by hand. A point never changes the zone under it.
+
+Zones are kept as drawn through merging (no joining or hole filling). An area with holes is stored as one outline with a zero-width cut to each hole, which the GLB export triangulates correctly. `worker/tests/test_zones.py` checks the behaviour on a synthetic scene.
+
+Notes:
 - The first run downloads the model weights from Hugging Face (about 600 MB) and caches them. Later runs work offline.
-- It runs on a laptop CPU, a few seconds per batch of 32 regions. No GPU or training needed.
-- It assigns only these kinds: building (roofs), grass, tree, path (sidewalks and footpaths), road, light (lamp posts) and bench. Each has a few text prompts in `PROMPTS` in the adapter ("an aerial photo of a lawn", ...). Edit that list to change the set.
-- Every region gets the closest of these kinds; nothing is left out. Low-confidence results are flagged for review.
-- Grass, path and road are treated as the base surfaces: they start 3 times more likely (`PRIOR` in the adapter), touching regions of the same base kind are joined into one block per photo with holes filled in, and they come first in the output so buildings, trees, lamp posts and benches sit on top of them (`BASE_KINDS` in `erfmap_worker.py`).
-- It is a general-purpose image model, not trained on drone surveys. Expect reasonable results on grass, water, roads, roofs and trees, and treat everything as a proposal.
-- `ERFMAP_CLIP_MODEL` and `ERFMAP_CLIP_PRETRAINED` choose another [OpenCLIP model](https://github.com/mlfoundations/open_clip), e.g. `ViT-L-14` / `laion2b_s32b_b82k` for better accuracy at about 3x the time.
+- On a laptop CPU it takes about 30 to 40 seconds per photo (or video keyframe). No GPU or training is needed.
+- Zones come first in the output and points after, so points sit on top.
+- It is a general-purpose image model, not trained on drone surveys. Treat everything as a proposal and check it in Review.
+- `ERFMAP_ZONES=off` turns the zones pass off and falls back to colour clustering plus the region classifier (`adapters/clip_classifier.py`, same 7 kinds). `ERFMAP_CLIP_MODEL` and `ERFMAP_CLIP_PRETRAINED` choose another [OpenCLIP model](https://github.com/mlfoundations/open_clip).
 
 `worker/adapters/colour_heuristic_classifier.py` implements this contract with a colour heuristic. It exists only to test the boundary. It reports `"heuristic": true`, caps confidence at 0.5 and is labelled as not a trained model in the UI.
 
