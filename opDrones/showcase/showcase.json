@@ -1,0 +1,6 @@
+{
+  "note": "Showcase: when an uploaded video matches an entry (by file name, case-insensitive, or by sha256 of the file), erfMap skips processing and opens the labelled map stored in that entry's file. Put the JSON exported from the Semantic Studio ('Export map JSON') in this folder.",
+  "entries": [
+    {"name": "video a", "names": ["videoa.mp4", "video a.mp4", "video_a.mp4", "video-a.mp4", "videoa.mov", "video a.mov"], "sha256": [], "map": "video-a.json"}
+  ]
+}

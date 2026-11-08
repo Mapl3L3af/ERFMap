@@ -354,6 +354,24 @@ function createIntake({directory, createProject, readBody}) {
     }
     // One video, or one or more photos. Photo jobs are created with the first
     // photo and ?defer=1, the rest are added to /originals, then /start runs them.
+    // Showcase: a known video (by name or sha256) opens its hand-labelled map
+    // from showcase/ instead of running the pipeline.
+    function showcaseFor(name, file) {
+        let config;
+        try { config = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'showcase', 'showcase.json'), 'utf8')); } catch { return null; }
+        const lower = String(name).toLowerCase();
+        let hash = null;
+        for (const entry of config.entries || []) {
+            const byName = (entry.names || []).some(n => n.toLowerCase() === lower);
+            if (!byName && (entry.sha256 || []).length) hash = hash || require('node:crypto').createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+            if (!byName && !(entry.sha256 || []).includes(hash)) continue;
+            const mapFile = path.join(__dirname, '..', 'showcase', entry.map);
+            if (!fs.existsSync(mapFile)) return null;
+            const data = JSON.parse(fs.readFileSync(mapFile, 'utf8'));
+            return restore(data.site || data);
+        }
+        return null;
+    }
     async function upload(req, url) {
         const capture = captureProfile(url.searchParams.get('height_agl_m'));
         const name = cleanName(url.searchParams.get('name') || 'video.mp4');
@@ -366,6 +384,13 @@ function createIntake({directory, createProject, readBody}) {
         try { size = await receive(req, target, MAX_UPLOAD); }
         catch (e) { fs.rmSync(dir(id), {recursive: true, force: true}); throw e; }
         const original = {name, path: 'original/' + name, size, type: req.headers['content-type'] || null};
+        const showcase = media === 'video' ? showcaseFor(name, target) : null;
+        if (showcase) {
+            const code = createProject(showcase);
+            write(path.join(dir(id), 'job.json'), {id, name, media, original, originals: [original], createdAt: new Date().toISOString(), showcase: {code},
+                stages: Object.fromEntries(STAGES.map(s => [s.id, {status: 'complete', progress: 1, summary: 'Showcase map'}])), review: {features: {}, phase: 'ready', feedback: []}, imports: [{code, at: new Date().toISOString(), features: showcase.features.length}]});
+            return {id, name, media, showcase: {code, features: showcase.features.length}};
+        }
         const job = {id, name, media, captureProfile: capture, sceneMode: 'stitched', createdAt: new Date().toISOString(), original, originals: [original], started: media === 'video' || url.searchParams.get('defer') !== '1',
             stages: Object.fromEntries(STAGES.map(s => [s.id, {status: 'queued', progress: 0, attempts: 0}])), calibration: {markers: [], references: [], markerSideM: 0.3048}, review: {features: {}, phase: 'zones', feedback: []}, imports: []};
         write(path.join(dir(id), 'labels.json'), labels());
