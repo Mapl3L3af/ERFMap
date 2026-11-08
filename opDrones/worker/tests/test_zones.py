@@ -251,6 +251,35 @@ class BuildingTest(unittest.TestCase):
             self.assertAlmostEqual(a, 90, delta=1.5)
 
 
+    def test_a_frame_edge_pins_the_side(self):
+        mask = np.zeros((600, 800), np.uint8)
+        cv2.rectangle(mask, (212, 160), (590, 440), 1, -1)            # the traced roof falls 12 px short of the frame
+        cv2.circle(mask, (590, 300), 30, 0, -1)                         # and has a bite out of one side
+        frame = np.array([[200, 150, 600, 150], [600, 150, 600, 450], [600, 450, 200, 450], [200, 450, 200, 150]], float)
+        corners = cz.square_up(mask > 0, frame)
+        xs, ys = sorted(corners[:, 0]), sorted(corners[:, 1])
+        self.assertAlmostEqual(xs[0], 200, delta=1)
+        self.assertAlmostEqual(xs[-1], 600, delta=1)
+        self.assertAlmostEqual(ys[0], 150, delta=1)
+        self.assertAlmostEqual(ys[-1], 450, delta=1)
+
+    def test_a_framed_roof_is_found_but_a_path_is_not(self):
+        image = np.full((H, W, 3), (60, 150, 70), np.uint8)              # lawn
+        cv2.rectangle(image, (600, 100), (850, 300), (110, 110, 110), -1)  # flat grey roof ...
+        cv2.rectangle(image, (600, 100), (850, 300), (215, 215, 215), 8)   # ... with a light frame
+        cv2.rectangle(image, (100, 0), (140, H - 1), (110, 110, 110), -1)   # a grey path of the same colour, 40 px wide
+        probs = np.zeros((H, W, len(cz.CLASSES)), np.float32)
+        probs[..., cz.CLASSES.index('grass')] = 0.5
+        probs[..., cz.CLASSES.index('path')] = 0.23
+        probs[..., cz.CLASSES.index('building')] = 0.22                # well short of what a building normally needs
+        probs[..., cz.CLASSES.index('road')] = 0.05
+        regions = cz.build_zones(image, probs, (W, H))
+        roofs = [r for r in regions if r.get('model_label') == 'building']
+        self.assertEqual(len(roofs), 1)
+        self.assertTrue(inside(roofs[0]['polygon'], 725, 200))
+        self.assertFalse(any(inside(r['polygon'], 120, 400) for r in roofs), 'the path is not a building')
+
+
 class PathJoinTest(unittest.TestCase):
     def build(self, edit):
         image, probs = scene()

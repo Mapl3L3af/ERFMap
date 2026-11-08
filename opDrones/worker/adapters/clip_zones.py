@@ -57,6 +57,9 @@ VEG_MIN, VEG_MAX = 0.02, 0.10   # limits for the per-photo greenness threshold
 JOIN_REACH = 0.15         # path ends this far apart (share of the photo's long side) may be joined ...
 JOIN_ANGLE = 35           # ... when each points at the other within this many degrees
 T_REACH = 3               # an end pointing at the side of another path is carried up to this many path widths
+FRAME_MIN = 0.05          # straight frame edges and framed roofs are at least this share of the photo's long side
+FRAME_SUPPORT = 0.5       # share of a rectangle's outline that must lie on visible edges to count as framed
+FRAME_LEAN = 0.4          # a framed area becomes a building when its building score is this share of the best
 PAVED = 0.6               # on bare (not green) ground, building/path/road wins when within this ratio of the best score
 POINT_MIN = 0.6           # a lamp post or bench needs at least this probability ...
 POINT_MARGIN = 2.0        # ... and this many times the best surface score
@@ -121,10 +124,39 @@ def vegetation(image):
     return veg > 0
 
 
-def square_up(mask):
+def frame_edges(image, bare):
+    """Long straight edges on bare (not green) ground: the frame most buildings have around the roof,
+    plus kerbs and path sides. Returns (edge pixels, segments [x1, y1, x2, y2])."""
+    h, w = image.shape[:2]
+    gray = cv2.cvtColor(cv2.bilateralFilter(image, 9, 40, 9), cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 40, 120)
+    edges[~(cv2.dilate(bare.astype(np.uint8), np.ones((5, 5), np.uint8)) > 0)] = 0
+    found = cv2.HoughLinesP(edges, 1, np.pi / 360, 40, minLineLength=int(FRAME_MIN * max(h, w)), maxLineGap=4)
+    return edges > 0, (found.reshape(-1, 4).astype(np.float64) if found is not None else np.zeros((0, 4)))
+
+
+def framed(piece, edges, size):
+    """Does a bare area look like a framed roof: close to a rectangle, not thin like a path, and with
+    most of its rectangle's outline lying on visible straight edges?"""
+    h, w = size
+    contours, _ = cv2.findContours(piece.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    if not contours:
+        return False
+    c = max(contours, key=cv2.contourArea)
+    (cx, cy), (rw, rh), angle = cv2.minAreaRect(c)
+    if min(rw, rh) < FRAME_MIN * max(h, w) or cv2.contourArea(c) < 0.75 * rw * rh:
+        return False
+    outline = np.zeros((h, w), np.uint8)
+    cv2.polylines(outline, [np.round(cv2.boxPoints(((cx, cy), (rw, rh), angle))).astype(np.int32)], True, 1, 1)
+    near_edge = cv2.dilate(edges.astype(np.uint8), np.ones((7, 7), np.uint8)) > 0
+    return near_edge[outline > 0].mean() >= FRAME_SUPPORT
+
+
+def square_up(mask, segments=None):
     """A right-angled outline for one building: each side is a best-fit straight line through the
     traced edge, every side runs along or across the building's main direction, and neighbouring
-    sides meet at 90 degrees. Returns work-pixel corners, or None when no good fit exists."""
+    sides meet at 90 degrees. Where a straight frame edge runs along a side, the side is pinned to it.
+    Returns work-pixel corners, or None when no good fit exists."""
     contours, _ = cv2.findContours(mask.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_NONE)
     if not contours:
         return None
@@ -160,10 +192,27 @@ def square_up(mask):
     if len(sides) < 4 or len(sides) % 2:
         return None
     lines = []
+    snap = max(4.0, 0.02 * max(mask.shape))
     for k, parts in sides:
         pts = np.concatenate(parts)
         normal = axes[1 - k]
-        lines.append((axes[k], normal, float(np.mean(pts @ normal))))   # best-fit offset of the side
+        offset = float(np.mean(pts @ normal))                 # best-fit offset of the side
+        if segments is not None and len(segments):
+            lo, hi = np.min(pts @ axes[k]), np.max(pts @ axes[k])
+            best = None
+            for x1, y1, x2, y2 in segments:                   # a frame edge along this side pins it
+                d = np.array([x2 - x1, y2 - y1])
+                n = np.hypot(*d)
+                if n == 0 or abs(np.dot(d / n, axes[k])) < np.cos(np.radians(4)):
+                    continue
+                o = float(np.dot([(x1 + x2) / 2, (y1 + y2) / 2], normal))
+                along = sorted([np.dot([x1, y1], axes[k]), np.dot([x2, y2], axes[k])])
+                overlap = min(hi, along[1]) - max(lo, along[0])
+                if abs(o - offset) <= snap and overlap > 0.3 * (hi - lo) and (best is None or overlap > best[0]):
+                    best = (overlap, o)
+            if best:
+                offset = best[1]
+        lines.append((axes[k], normal, offset))
     out = []
     for (d1, n1, c1), (d2, n2, c2) in zip(lines, lines[1:] + lines[:1]):
         A = np.array([n1, n2])
@@ -398,6 +447,14 @@ def build_zones(image, probs, size, trees=None, votes=None):
     # On bare ground the models choose between building, path and road, and are trusted more readily.
     bare = ~vegetation(image)
     building = bare & (b >= PAVED * best)
+    # Roofs usually have a frame: a bare, rectangular area whose outline sits on straight edges is
+    # taken as a building even when the scores only lean that way.
+    edges, segments = frame_edges(image, bare)
+    count, comp = cv2.connectedComponents((bare & ~building).astype(np.uint8))
+    for c in range(1, count):
+        piece = comp == c
+        if piece.sum() >= 4 * MIN_ZONE * h * w and b[piece].mean() >= FRAME_LEAN * best[piece].mean() and framed(piece, edges, (h, w)):
+            building |= piece
     # Where a tree crown is the best match, the ground under it is left to grass (the tree becomes a point),
     # so tree shadows and canopies are not mistaken for road.
     line = bare & ~building & (np.maximum(pth, rd) >= PAVED * best) & (tr < best)
@@ -439,7 +496,7 @@ def build_zones(image, probs, size, trees=None, votes=None):
     building = np.zeros((h, w), bool)
     for c in range(1, count):
         piece = comp == c
-        corners = square_up(piece)
+        corners = square_up(piece, segments)
         if corners is None:
             building |= piece
             continue
